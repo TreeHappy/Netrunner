@@ -87,9 +87,12 @@ Ordered by what unblocks the rest:
    instead of NLP over rules text.
 6. **Export formats** — NRDB/JNet/OCTGN output next to the plain-text format;
    natural home is `internal/deck` (`EncodeTo(format)`).
-7. **Query power-ups** — pack cycling (key `4`) and a max-cost cap (key `5`) ship
-   in both TUIs; the compiled SQL is shown live under the panes. Remaining
-   ideas: cost *ranges* (min+max), strength/memory bounds, rules-text search.
+7. **Query power-ups** — all filter dimensions are now multi-valued
+   (`side IN (...)`). nrbrowse has pack cycling (`4`), max-cost cap (`5`),
+   modal multi-select value pickers (Ctrl/Alt+1..5: type-to-filter, space
+   toggles, enter applies) and a sort-field picker (`o`). The compiled SQL
+   is shown live under the panes. Remaining ideas: strength/memory bounds,
+   rules-text search, porting the pickers to nrbuild.
 8. **Image polish** — cache misses should offer to fetch on demand
    (`scripts/nr-fetch-images.sh <code>`); consider thumbnails in the browser
    list if kitty unicode placeholders stabilize upstream.

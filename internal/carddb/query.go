@@ -17,14 +17,35 @@ type DB interface {
 // SQL WHERE clause against the DuckDB cache, so browsers and other tools
 // share one filtering implementation.
 type Query struct {
-	Side    string // "", "corp", "runner"
-	Faction string // "" = all
-	Type    string // "" = all
-	Pack    string // "" = all
-	Text    string // substring match on title (case-insensitive)
+	Side    []string // empty = all; values from carddb.Distinct("side_code")
+	Faction []string // empty = all
+	Type    []string // empty = all
+	Pack    []string // empty = all
+	Text    string   // substring match on title (case-insensitive)
 	// Cost bounds, inclusive; nil = unset (so the zero Query has no filters).
 	MinCost *int
 	MaxCost *int
+	// Exact cost values; empty = unrestricted. Combined with Min/MaxCost.
+	Costs []int
+	// ORDER BY terms, applied in sequence. Unknown fields are skipped.
+	Order []Sort
+}
+
+// Sort is one ORDER BY term.
+type Sort struct {
+	Field string // key into SortColumns
+	Desc  bool
+}
+
+// SortColumns maps user-facing field names to SQL columns for ordering.
+var SortColumns = map[string]string{
+	"title":    "title",
+	"code":     "code",
+	"type":     "type_code",
+	"faction":  "faction_code",
+	"pack":     "pack_code",
+	"cost":     "cost",
+	"strength": "strength",
 }
 
 // IntPtr returns a pointer to v, for setting Query cost bounds.
@@ -33,23 +54,24 @@ func IntPtr(v int) *int { return &v }
 const costUnset = -1
 
 func (q Query) Empty() bool {
-	return q.Side == "" && q.Faction == "" && q.Type == "" && q.Pack == "" &&
-		q.Text == "" && q.MinCost == nil && q.MaxCost == nil
+	return len(q.Side) == 0 && len(q.Faction) == 0 && len(q.Type) == 0 &&
+		len(q.Pack) == 0 && q.Text == "" && q.MinCost == nil &&
+		q.MaxCost == nil && len(q.Costs) == 0
 }
 
 func (q Query) String() string {
 	parts := []string{}
-	if q.Side != "" {
-		parts = append(parts, "side:"+q.Side)
+	if s := joinLabels("side", q.Side); s != "" {
+		parts = append(parts, s)
 	}
-	if q.Faction != "" {
-		parts = append(parts, "faction:"+q.Faction)
+	if s := joinLabels("faction", q.Faction); s != "" {
+		parts = append(parts, s)
 	}
-	if q.Type != "" {
-		parts = append(parts, "type:"+q.Type)
+	if s := joinLabels("type", q.Type); s != "" {
+		parts = append(parts, s)
 	}
-	if q.Pack != "" {
-		parts = append(parts, "pack:"+q.Pack)
+	if s := joinLabels("pack", q.Pack); s != "" {
+		parts = append(parts, s)
 	}
 	if q.Text != "" {
 		parts = append(parts, "text:"+q.Text)
@@ -57,7 +79,33 @@ func (q Query) String() string {
 	if c := q.costString(); c != "" {
 		parts = append(parts, c)
 	}
+	if s := q.sortString(); s != "" {
+		parts = append(parts, s)
+	}
 	return strings.Join(parts, " ")
+}
+
+// joinLabels renders "name:v1,v2" for a filter dimension (empty if unset).
+func joinLabels(name string, vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	return name + ":" + strings.Join(vals, ",")
+}
+
+// sortString renders the ORDER BY terms as a compact label ("sort:type,cost↓").
+func (q Query) sortString() string {
+	if len(q.Order) == 0 {
+		return ""
+	}
+	names := make([]string, len(q.Order))
+	for i, s := range q.Order {
+		names[i] = s.Field + "↑"
+		if s.Desc {
+			names[i] = s.Field + "↓"
+		}
+	}
+	return "sort:" + strings.Join(names, ",")
 }
 
 // costString renders the cost bounds as a compact filter label.
@@ -74,6 +122,13 @@ func (q Query) costString() string {
 	case maxSet:
 		return fmt.Sprintf("cost:<=%d", *q.MaxCost)
 	}
+	if len(q.Costs) > 0 {
+		nums := make([]string, len(q.Costs))
+		for i, c := range q.Costs {
+			nums[i] = strconv.Itoa(c)
+		}
+		return "cost:" + strings.Join(nums, ",")
+	}
 	return ""
 }
 
@@ -81,22 +136,20 @@ func (q Query) costString() string {
 func (q Query) SQL() (string, []any) {
 	var conds []string
 	var args []any
-	if q.Side != "" {
-		conds = append(conds, "side_code = ?")
-		args = append(args, q.Side)
+	inCond := func(col string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+		conds = append(conds, col+" IN ("+marks+")")
+		for _, v := range vals {
+			args = append(args, v)
+		}
 	}
-	if q.Faction != "" {
-		conds = append(conds, "faction_code = ?")
-		args = append(args, q.Faction)
-	}
-	if q.Type != "" {
-		conds = append(conds, "type_code = ?")
-		args = append(args, q.Type)
-	}
-	if q.Pack != "" {
-		conds = append(conds, "pack_code = ?")
-		args = append(args, q.Pack)
-	}
+	inCond("side_code", q.Side)
+	inCond("faction_code", q.Faction)
+	inCond("type_code", q.Type)
+	inCond("pack_code", q.Pack)
 	if q.Text != "" {
 		conds = append(conds, "lower(title) LIKE ?")
 		args = append(args, "%"+strings.ToLower(q.Text)+"%")
@@ -109,17 +162,49 @@ func (q Query) SQL() (string, []any) {
 		conds = append(conds, "(cost IS NOT NULL AND cost <= ?)")
 		args = append(args, *q.MaxCost)
 	}
+	if len(q.Costs) > 0 {
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Costs)), ",")
+		conds = append(conds, "(cost IS NOT NULL AND cost IN ("+marks+"))")
+		for _, c := range q.Costs {
+			args = append(args, c)
+		}
+	}
 	if len(conds) == 0 {
 		return "", args
 	}
 	return "WHERE " + strings.Join(conds, " AND "), args
 }
 
+// orderBySQL renders the ORDER BY column list ("" = none; callers fall
+// back to the default "title, code").
+func (q Query) OrderBySQL() string {
+	if len(q.Order) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, s := range q.Order {
+		col, ok := SortColumns[s.Field]
+		if !ok {
+			continue
+		}
+		dir := " ASC"
+		if s.Desc {
+			dir = " DESC"
+		}
+		parts = append(parts, col+dir)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Run executes the query against the cache.
 func Run(db DB, q Query) ([]Card, error) {
 	where, args := q.SQL()
+	order := q.OrderBySQL()
+	if order == "" {
+		order = "title ASC, code ASC"
+	}
 	rows, err := db.Query(
-		`SELECT `+cardColumns+` FROM cards `+where+` ORDER BY title, code`, args...)
+		`SELECT `+cardColumns+` FROM cards `+where+` ORDER BY `+order, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +231,14 @@ func (q Query) DebugSQL() string {
 	for _, a := range args {
 		where = strings.Replace(where, "?", bindInline(a), 1)
 	}
+	order := q.OrderBySQL()
+	if order == "" {
+		order = "title ASC, code ASC"
+	}
 	if where != "" {
 		where += " "
 	}
-	return "SELECT code, title, … FROM cards " + where + "ORDER BY title, code"
+	return "SELECT code, title, … FROM cards " + where + "ORDER BY " + order
 }
 
 // bindInline formats one SQL argument as a literal: ints bare, strings

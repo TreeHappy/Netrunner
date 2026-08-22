@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -202,7 +203,7 @@ func (m *model) addSelected() {
 		return
 	}
 	if sel.card.Type == "identity" {
-		if sel.card.Side != "" && m.query.Side != "" && sel.card.Side != m.query.Side {
+		if len(m.query.Side) > 0 && !slices.Contains(m.query.Side, sel.card.Side) {
 			m.status = "identity is for the other side"
 			return
 		}
@@ -296,11 +297,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addSelected()
 			return m, nil
 		case "i":
-			side := m.query.Side
-			if side == "" {
-				side = "corp"
+			side := "corp"
+			if len(m.query.Side) > 0 {
+				side = m.query.Side[0]
 			}
-			m.query = carddb.Query{Side: side, Type: "identity"}
+			m.query = carddb.Query{Side: []string{side}, Type: []string{"identity"}}
 			return m, m.refresh()
 		case "h", "left":
 			m.focus = focusBrowser
@@ -318,13 +319,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "1":
-			cycle(&m.query.Side, sides)
+			m.query.Side = cycleSingle(m.query.Side, sides)
 			return m, m.refresh()
 		case "2":
-			cycle(&m.query.Type, types)
+			m.query.Type = cycleSingle(m.query.Type, types)
 			return m, m.refresh()
 		case "3":
-			cycle(&m.query.Faction, factions)
+			m.query.Faction = cycleSingle(m.query.Faction, factions)
 			return m, m.refresh()
 		case "4":
 			m.cyclePack()
@@ -436,7 +437,7 @@ func (m model) load() tea.Cmd {
 	m.d = d
 	m.deckSel = 0
 	m.syncDeckOff()
-	m.query = carddb.Query{Side: d.Identity.Side}
+	m.query = carddb.Query{Side: []string{d.Identity.Side}}
 	cmd := m.refresh()
 	m.status = "loaded " + path + " (" + strconv.Itoa(d.Size()) + " cards)"
 	_ = cmd
@@ -464,13 +465,17 @@ func (m *model) cyclePack() {
 		return
 	}
 	idx := 0
+	pack := ""
+	if len(m.query.Pack) == 1 {
+		pack = m.query.Pack[0]
+	}
 	for i, p := range m.packs {
-		if p == m.query.Pack {
+		if p == pack {
 			idx = i
 			break
 		}
 	}
-	m.query.Pack = m.packs[(idx+1)%len(m.packs)]
+	m.query.Pack = []string{m.packs[(idx+1)%len(m.packs)]}
 }
 
 // costCaps is the max-cost ladder the cost filter cycles through.
@@ -488,21 +493,35 @@ func nextCostCap(c int) int {
 	return costUnset
 }
 
-func cycle(v *string, values []string) {
-	for i, s := range values {
-		if s == *v {
-			*v = values[(i+1)%len(values)]
-			return
+// cycleSingle advances a single-value selection through choices ("" in the
+// list means "all" → empty slice). Multi-selections collapse to the next
+// single value.
+func cycleSingle(cur []string, choices []string) []string {
+	curVal := ""
+	if len(cur) == 1 {
+		curVal = cur[0]
+	}
+	for i, c := range choices {
+		if c == curVal {
+			next := choices[(i+1)%len(choices)]
+			if next == "" {
+				return nil
+			}
+			return []string{next}
 		}
 	}
-	*v = values[0]
+	return nil
 }
 
-func label(name, val string) string {
-	if val == "" {
+// containsStr reports whether vals contains v.
+func containsStr(vals []string, v string) bool { return slices.Contains(vals, v) }
+
+// label renders "name:all" for an unset dimension or the joined values.
+func label(name string, vals []string) string {
+	if len(vals) == 0 {
 		return name + ":all"
 	}
-	return name + ":" + val
+	return name + ":" + strings.Join(vals, ",")
 }
 
 // paneInteriors splits the terminal width into the three pane *interior*
@@ -725,7 +744,7 @@ func main() {
 		if b, err := os.ReadFile(file); err == nil {
 			if d, err := deck.Decode(db, string(b)); err == nil {
 				m.d = d
-				m.query = carddb.Query{Side: d.Identity.Side}
+				m.query = carddb.Query{Side: []string{d.Identity.Side}}
 			}
 		}
 	}
@@ -752,7 +771,7 @@ func seedFromStdin(db carddb.DB, m *model) {
 	if strings.Contains(text, "x ") || strings.Contains(strings.ToLower(text), "identity:") {
 		if d, err := deck.Decode(db, text); err == nil && d.Identity.Type == "identity" {
 			m.d = d
-			m.query = carddb.Query{Side: d.Identity.Side}
+			m.query = carddb.Query{Side: []string{d.Identity.Side}}
 			return
 		}
 	}

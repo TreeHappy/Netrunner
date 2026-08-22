@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -54,7 +55,168 @@ type model struct {
 	status   string
 	quitting bool
 	loaded   bool
-	artRow   int // art-band row within the preview (-1 when absent)
+	artRow   int  // art-band row within the preview (-1 when absent)
+	sortOpen bool // sort-picker overlay active
+	menuOpen bool // "p" dimension menu active
+	pick     valuePicker
+}
+
+// pickerKinds maps the Ctrl/Alt+1..5 pickers to their query dimension.
+var pickerKinds = []string{"side", "type", "faction", "pack", "cost"}
+
+// valuePicker is the modal multi-select filter chooser (Ctrl/Alt+1..5).
+type valuePicker struct {
+	open     bool
+	col      int // index into pickerKinds (0-based)
+	cursor   int
+	filter   string
+	values   []string
+	selected map[string]bool
+}
+
+// filtered returns the candidate values matching the typed substring.
+func (p *valuePicker) filtered() []string {
+	if p.filter == "" {
+		return p.values
+	}
+	f := strings.ToLower(p.filter)
+	var out []string
+	for _, v := range p.values {
+		if strings.Contains(strings.ToLower(v), f) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// openPicker prepares the picker for a dimension, pre-selecting whatever
+// the current query already filters on.
+func (m *model) openPicker(col int) {
+	if col < 0 || col >= len(pickerKinds) {
+		return
+	}
+	m.sortOpen = false
+	m.menuOpen = false
+	p := valuePicker{col: col, selected: map[string]bool{}}
+	switch col {
+	case 0:
+		p.values = distinctOr(m.db, "side_code", sides[1:])
+		setFromQuery(p.selected, m.query.Side)
+	case 1:
+		p.values = distinctOr(m.db, "type_code", types[1:])
+		setFromQuery(p.selected, m.query.Type)
+	case 2:
+		p.values = distinctOr(m.db, "faction_code", factions[1:])
+		setFromQuery(p.selected, m.query.Faction)
+	case 3:
+		p.values = distinctOr(m.db, "pack_code", nil)
+		setFromQuery(p.selected, m.query.Pack)
+	case 4:
+		for c := range costCaps[1:] { // skip -1 sentinel
+			p.values = append(p.values, strconv.Itoa(c))
+		}
+		for _, c := range m.query.Costs {
+			p.selected[strconv.Itoa(c)] = true
+		}
+	}
+	m.pick = p
+	m.pick.open = true
+}
+
+// distinctOr queries distinct values, falling back to the static list so
+// the picker still works without a database (tests, degraded cache).
+func distinctOr(db carddb.DB, column string, fallback []string) []string {
+	if db != nil {
+		if vals, err := carddb.Distinct(db, column); err == nil && len(vals) > 0 {
+			return vals
+		}
+	}
+	return fallback
+}
+
+func setFromQuery(dst map[string]bool, vals []string) {
+	for _, v := range vals {
+		dst[v] = true
+	}
+}
+
+// applyPicker writes the selection back into the query and refreshes.
+func (m *model) applyPicker() tea.Cmd {
+	p := &m.pick
+	slice := func() []string {
+		var out []string
+		for _, v := range p.values {
+			if p.selected[v] {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	switch p.col {
+	case 0:
+		m.query.Side = slice()
+	case 1:
+		m.query.Type = slice()
+	case 2:
+		m.query.Faction = slice()
+	case 3:
+		m.query.Pack = slice()
+	case 4:
+		m.query.Costs = nil
+		for _, v := range slice() {
+			n, _ := strconv.Atoi(v)
+			m.query.Costs = append(m.query.Costs, n)
+		}
+		sort.Ints(m.query.Costs)
+	}
+	p.open = false
+	return m.refresh()
+}
+
+// menuPanel is the one-line dimension chooser shown while "p" is active.
+func (m model) menuPanel() string {
+	head := lipgloss.NewStyle().Bold(true).Render("pick filters — ")
+	faint := lipgloss.NewStyle().Faint(true)
+	return head + faint.Render("[1] side · [2] type · [3] faction · [4] pack · [5] cost · esc cancel")
+}
+
+// pickPanel renders the modal multi-select chooser below the panes.
+func (m model) pickPanel() string {
+	p := &m.pick
+	title := pickerKinds[p.col]
+	head := lipgloss.NewStyle().Bold(true).Render(
+		title + " — type to filter · ↑/↓ move · space select · enter apply · esc cancel")
+	faint := lipgloss.NewStyle().Faint(true)
+	rows := p.filtered()
+	var b strings.Builder
+	b.WriteString(head + "\n" + faint.Render("/"+p.filter+"▏"))
+	if len(rows) == 0 {
+		b.WriteString("\n" + faint.Render("(no matches)"))
+		return b.String()
+	}
+	const winH = 8
+	start := p.cursor - winH/2
+	if start > len(rows)-winH {
+		start = len(rows) - winH
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := min(len(rows), start+winH)
+	for i := start; i < end; i++ {
+		box := "[ ]"
+		style := faint
+		if p.selected[rows[i]] {
+			box = "[x]"
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#88ff88"))
+		}
+		cur := "  "
+		if i == p.cursor {
+			cur = "> "
+		}
+		b.WriteString("\n" + style.Render(cur+box+" "+rows[i]))
+	}
+	return b.String()
 }
 
 var (
@@ -87,6 +249,63 @@ func imageStatusDefault() string {
 		return "images off · v toggles"
 	}
 	return "terminal has no graphics protocol; text previews"
+}
+
+// sortChoices are the fields offered in the sort picker, in display order.
+var sortChoices = []string{"title", "type", "faction", "pack", "cost", "strength", "code"}
+
+// sortChoiceByKey maps a picker digit (1-based) to its field, "" if out of range.
+func sortChoiceByKey(n int) string {
+	if n < 1 || n > len(sortChoices) {
+		return ""
+	}
+	return sortChoices[n-1]
+}
+
+// toggleSort cycles a field through the order terms: absent → ascending →
+// descending → absent. Reports whether the field is a known sort column.
+func (m *model) toggleSort(field string) bool {
+	if _, ok := carddb.SortColumns[field]; !ok {
+		return false
+	}
+	for i, s := range m.query.Order {
+		if s.Field != field {
+			continue
+		}
+		if !s.Desc {
+			m.query.Order[i].Desc = true
+		} else {
+			m.query.Order = append(m.query.Order[:i], m.query.Order[i+1:]...)
+		}
+		return true
+	}
+	m.query.Order = append(m.query.Order, carddb.Sort{Field: field})
+	return true
+}
+
+// sortPanel renders the multi-select picker shown while it is open: one
+// line per field with its current position/direction in the ORDER BY.
+func (m model) sortPanel() string {
+	head := lipgloss.NewStyle().Bold(true).Render("sort — [1-7] toggle ↑/↓/off · esc close")
+	faint := lipgloss.NewStyle().Faint(true)
+	var b strings.Builder
+	b.WriteString(head)
+	for i, f := range sortChoices {
+		state := "·"
+		style := faint
+		for j, s := range m.query.Order {
+			if s.Field == f {
+				mark := "↑"
+				if s.Desc {
+					mark = "↓"
+				}
+				state = fmt.Sprintf("%s%d", mark, j+1) // direction + order position
+				style = lipgloss.NewStyle().Foreground(lipgloss.Color("#88ff88"))
+			}
+		}
+		fmt.Fprintf(&b, "\n%s [%d] %-8s", style.Render(fmt.Sprintf("%s", state)), i+1, f)
+	}
+	return b.String()
 }
 
 func (m *model) refresh() tea.Cmd {
@@ -322,9 +541,96 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.menuOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m.quit()
+			case "esc", "enter", "p":
+				m.menuOpen = false
+				return m, nil
+			default:
+				n, err := strconv.Atoi(msg.String())
+				m.menuOpen = false
+				if err == nil && n >= 1 && n <= len(pickerKinds) {
+					m.openPicker(n - 1)
+				}
+				return m, nil
+			}
+		}
+		if m.pick.open {
+			rows := m.pick.filtered()
+			switch msg.String() {
+			case "ctrl+c":
+				return m.quit()
+			case "esc":
+				m.pick.open = false
+				return m, nil
+			case "enter":
+				return m, m.applyPicker()
+			case "down", "j", "ctrl+n":
+				if m.pick.cursor < len(rows)-1 {
+					m.pick.cursor++
+				}
+				return m, nil
+			case "up", "k", "ctrl+p":
+				if m.pick.cursor > 0 {
+					m.pick.cursor--
+				}
+				return m, nil
+			case " ", "space":
+				if m.pick.cursor < len(rows) {
+					v := rows[m.pick.cursor]
+					m.pick.selected[v] = !m.pick.selected[v]
+				}
+				return m, nil
+			case "backspace", "ctrl+h":
+				r := []rune(m.pick.filter)
+				if n := len(r); n > 0 {
+					m.pick.filter = string(r[:n-1])
+					m.pick.cursor = 0
+				}
+				return m, nil
+			default:
+				if len(msg.Runes) == 1 && msg.Runes[0] >= ' ' {
+					m.pick.filter += string(msg.Runes)
+					m.pick.cursor = 0
+				}
+				return m, nil
+			}
+		}
+		if m.sortOpen {
+			// Modal sort picker: capture everything except quit/close.
+			switch msg.String() {
+			case "ctrl+c":
+				return m.quit()
+			case "esc", "enter", "o", "ctrl+o", "s":
+				m.sortOpen = false
+				return m, nil
+			default:
+				n, err := strconv.Atoi(msg.String())
+				if err == nil && m.toggleSort(sortChoiceByKey(n)) {
+					return m, m.refresh()
+				}
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m.quit()
+		case "o", "ctrl+o":
+			if m.list.FilterState() != list.Filtering {
+				m.sortOpen = true
+				m.pick.open = false
+				m.menuOpen = false
+				return m, nil
+			}
+		case "p":
+			if m.list.FilterState() != list.Filtering {
+				m.menuOpen = true
+				m.sortOpen = false
+				m.pick.open = false
+				return m, nil
+			}
 		case "q":
 			if m.list.FilterState() != list.Filtering {
 				return m.quit()
@@ -342,14 +648,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			}
+		case "ctrl+1", "alt+1":
+			m.openPicker(0)
+			return m, nil
+		case "ctrl+2", "alt+2":
+			m.openPicker(1)
+			return m, nil
+		case "ctrl+3", "alt+3":
+			m.openPicker(2)
+			return m, nil
+		case "ctrl+4", "alt+4":
+			m.openPicker(3)
+			return m, nil
+		case "ctrl+5", "alt+5":
+			m.openPicker(4)
+			return m, nil
 		case "1":
-			cycle(&m.query.Side, sides)
+			m.query.Side = cycleSingle(m.query.Side, sides)
 			return m, m.refresh()
 		case "2":
-			cycle(&m.query.Type, types)
+			m.query.Type = cycleSingle(m.query.Type, types)
 			return m, m.refresh()
 		case "3":
-			cycle(&m.query.Faction, factions)
+			m.query.Faction = cycleSingle(m.query.Faction, factions)
 			return m, m.refresh()
 		case "4":
 			m.cyclePack()
@@ -381,14 +702,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func cycle(v *string, values []string) {
-	for i, s := range values {
-		if s == *v {
-			*v = values[(i+1)%len(values)]
-			return
+// cycleSingle advances a single-value selection through choices ("" in the
+// list means "all" → empty slice). Multi-selections collapse to one value.
+func cycleSingle(cur []string, choices []string) []string {
+	curVal := ""
+	if len(cur) == 1 {
+		curVal = cur[0]
+	}
+	for i, c := range choices {
+		if c == curVal {
+			next := choices[(i+1)%len(choices)]
+			if next == "" {
+				return nil
+			}
+			return []string{next}
 		}
 	}
-	*v = values[0]
+	return nil
 }
 
 // cyclePack advances the pack filter through the distinct pack codes in
@@ -397,14 +727,18 @@ func (m *model) cyclePack() {
 	if len(m.packs) == 0 {
 		return
 	}
+	pack := ""
+	if len(m.query.Pack) == 1 {
+		pack = m.query.Pack[0]
+	}
 	idx := 0
 	for i, p := range m.packs {
-		if p == m.query.Pack {
+		if p == pack {
 			idx = i
 			break
 		}
 	}
-	m.query.Pack = m.packs[(idx+1)%len(m.packs)]
+	m.query.Pack = []string{m.packs[(idx+1)%len(m.packs)]}
 }
 
 // costCaps is the max-cost ladder the cost filter cycles through.
@@ -422,11 +756,12 @@ func nextCostCap(c int) int {
 	return costUnset
 }
 
-func label(name, val string) string {
-	if val == "" {
+// label renders "name:all" for an unset dimension or the joined values.
+func label(name string, vals []string) string {
+	if len(vals) == 0 {
 		return name + ":all"
 	}
-	return name + ":" + val
+	return name + ":" + strings.Join(vals, ",")
 }
 
 func paneStyle(w, h int, focused bool) lipgloss.Style {
@@ -451,7 +786,7 @@ func (m model) View() string {
 		return trunc("terminal too small", max(1, m.width))
 	}
 	filterLine := lipgloss.NewStyle().Faint(true).Render(trunc(
-		fmt.Sprintf("[1] %s  [2] %s  [3] %s  [4] %s  [5] %s · %s · / search, enter print+quit, v images, q quit",
+		fmt.Sprintf("[1] %s  [2] %s  [3] %s  [4] %s  [5] %s · p pick · o sort · / search · v img · q quit · %s",
 			label("side", m.query.Side),
 			label("type", m.query.Type),
 			label("faction", m.query.Faction),
@@ -473,10 +808,33 @@ func (m model) View() string {
 	// Hard geometry guard: pane content can rewrap inside lipgloss and
 	// grow past its configured height; clip so the view always fits the
 	// terminal exactly (inline images break when the frame scrolls).
-	if rows := strings.Split(body, "\n"); len(rows) > m.height-2 {
+	var panels []string
+	extra := 0
+	if m.menuOpen {
+		panels = append(panels, m.menuPanel())
+	}
+	if m.pick.open {
+		panels = append(panels, m.pickPanel())
+	}
+	if m.sortOpen {
+		panels = append(panels, m.sortPanel())
+	}
+	for _, p := range panels {
+		extra += strings.Count(p, "\n") + 1
+	}
+	maxRows := m.height - 2 - extra // leave room for sql + filter lines
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	if rows := strings.Split(body, "\n"); len(rows) > maxRows {
 		bottom := rows[len(rows)-1] // preserve the pane bottom border
-		rows = append(rows[:max(1, m.height-3)], bottom)
+		rows = append(rows[:max(1, maxRows-1)], bottom)
 		body = strings.Join(rows, "\n")
+	}
+	panelText := strings.Join(panels, "\n")
+	out := body + "\n" + sqlLine + "\n" + filterLine
+	if panelText != "" {
+		out = body + "\n" + panelText + "\n" + sqlLine + "\n" + filterLine
 	}
 	// ueberzugpp overlays are drawn outside the terminal buffer; report the
 	// art band's absolute cell position each frame (mid interior starts at
@@ -488,7 +846,7 @@ func (m model) View() string {
 			image.HideArt()
 		}
 	}
-	return body + "\n" + sqlLine + "\n" + filterLine
+	return out
 }
 
 // costLabel renders the cost filter's value for the filter line.
@@ -627,7 +985,14 @@ const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd]
 Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
       1 side · 2 type · 3 faction · 4 pack · 5 cost cap,
+      p then 1-5 multi-select pickers for side/type/faction/pack/cost
+        (type to narrow, space selects, enter applies);
+        Ctrl/Alt+1..5 also open them where the terminal allows,
+      o multi-select sort fields (each press: ↑ → ↓ → off),
       v toggle image previews.
+
+Note: many terminals send indistinguishable control codes for Ctrl+digits
+(Ctrl+3 = Esc); use Alt+1..5 there.
 
 The filters always compile to one SQL query over the DuckDB cache; the
 exact statement is shown under the panes.
