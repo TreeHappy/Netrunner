@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const usage = `usage: nrrender [--plain] [--width N] [--no-icons] <card>...
+const usage = `usage: nrrender [--plain] [--width N] [--no-icons] [--nerd] <card>...
 
 Each <card> is one of:
   06081                        a card code, looked up in the local cache
@@ -26,6 +26,7 @@ func main() {
 	plain := flag.Bool("plain", false, "disable ANSI colors")
 	width := flag.Int("width", 0, "render width (0 = terminal width)")
 	noIcons := flag.Bool("no-icons", false, "replace emoji icons with ASCII glyphs")
+	nerd := flag.Bool("nerd", false, "use nerd-font glyphs instead of emojis (needs a nerd font)")
 	flag.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	flag.Parse()
 
@@ -35,6 +36,7 @@ func main() {
 	}
 	opts.Width = *width
 	opts.Icons = !*noIcons
+	opts.NerdIcons = *nerd && !*noIcons
 
 	args := flag.Args()
 	if len(args) == 0 {

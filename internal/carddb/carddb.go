@@ -10,28 +10,28 @@ import (
 )
 
 type Card struct {
-	Code             string
-	Title            string
-	Side             string
-	Faction          string
-	Type             string
-	Keywords         string
-	Text             string
-	Flavor           string
-	Cost             sql.NullInt64
-	Strength         sql.NullInt64
-	MemoryCost       sql.NullInt64
-	TrashCost        sql.NullInt64
-	AdvancementCost  sql.NullInt64
-	AgendaPoints     sql.NullInt64
-	BaseLink         sql.NullInt64
-	InfluenceLimit   sql.NullInt64
-	InfluenceCost    sql.NullInt64
-	MinimumDeckSize  sql.NullInt64
-	DeckLimit        sql.NullInt64
-	Uniqueness       bool
-	PackCode         string
-	Illustrator      string
+	Code            string
+	Title           string
+	Side            string
+	Faction         string
+	Type            string
+	Keywords        string
+	Text            string
+	Flavor          string
+	Cost            sql.NullInt64
+	Strength        sql.NullInt64
+	MemoryCost      sql.NullInt64
+	TrashCost       sql.NullInt64
+	AdvancementCost sql.NullInt64
+	AgendaPoints    sql.NullInt64
+	BaseLink        sql.NullInt64
+	InfluenceLimit  sql.NullInt64
+	InfluenceCost   sql.NullInt64
+	MinimumDeckSize sql.NullInt64
+	DeckLimit       sql.NullInt64
+	Uniqueness      bool
+	PackCode        string
+	Illustrator     string
 }
 
 // Open opens the duckdb cache. Path resolution order:
@@ -84,7 +84,7 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 }
 
 // ByCode fetches a single card by its 5-digit code.
-func ByCode(db *sql.DB, code string) (Card, error) {
+func ByCode(db DB, code string) (Card, error) {
 	row := db.QueryRow(
 		`SELECT `+cardColumns+` FROM cards WHERE code = ?`, code)
 	c, err := scanCard(row)

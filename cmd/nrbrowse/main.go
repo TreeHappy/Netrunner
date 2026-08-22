@@ -32,17 +32,12 @@ func (i item) FilterValue() string {
 	return strings.ToLower(i.card.Title + " " + i.card.Code)
 }
 
-type filters struct {
-	side    string // "", "corp", "runner"
-	faction string // "" = all
-	typ     string // "" = all
-}
-
 type model struct {
-	all      []carddb.Card
+	db       carddb.DB
+	cards    []carddb.Card
 	list     list.Model
 	preview  string
-	filters  filters
+	query    carddb.Query
 	width    int
 	height   int
 	opts     render.Options
@@ -52,11 +47,11 @@ type model struct {
 
 var (
 	sides    = []string{"", "corp", "runner"}
-	types    = []string{"", "agenda", "asset", "event", "hardware", "ice", "identity", "operation", "program", "resource", "upgrade"}
 	factions = []string{"", "anarch", "criminal", "shaper", "haas-bioroid", "jinteki", "nbn", "weyland-consortium", "neutral-runner", "neutral-corp"}
+	types    = []string{"", "agenda", "asset", "event", "hardware", "ice", "identity", "operation", "program", "resource", "upgrade"}
 )
 
-func newModel(cards []carddb.Card, opts render.Options) model {
+func newModel(db carddb.DB, opts render.Options) model {
 	delegate := list.NewDefaultDelegate()
 	l := list.New([]list.Item{}, delegate, 40, 24)
 	l.Title = "Netrunner cards"
@@ -64,28 +59,15 @@ func newModel(cards []carddb.Card, opts render.Options) model {
 	l.SetFilteringEnabled(true)
 	l.FilterInput.Placeholder = "search title/code…"
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
-	return model{all: cards, list: l, opts: opts}
-}
-
-func (m model) filtered() []carddb.Card {
-	var out []carddb.Card
-	for _, c := range m.all {
-		if m.filters.side != "" && c.Side != m.filters.side {
-			continue
-		}
-		if m.filters.faction != "" && c.Faction != m.filters.faction {
-			continue
-		}
-		if m.filters.typ != "" && c.Type != m.filters.typ {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
+	return model{db: db, list: l, opts: opts}
 }
 
 func (m *model) refresh() {
-	cards := m.filtered()
+	cards, err := carddb.Run(m.db, m.query)
+	if err != nil {
+		m.status = "error: " + err.Error()
+		return
+	}
 	items := make([]list.Item, len(cards))
 	for i, c := range cards {
 		items[i] = item{card: c}
@@ -161,15 +143,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "1":
-			cycle(&m.filters.side, sides)
+			cycle(&m.query.Side, sides)
 			m.refresh()
 			return m, nil
 		case "2":
-			cycle(&m.filters.typ, types)
+			cycle(&m.query.Type, types)
 			m.refresh()
 			return m, nil
 		case "3":
-			cycle(&m.filters.faction, factions)
+			cycle(&m.query.Faction, factions)
 			m.refresh()
 			return m, nil
 		}
@@ -207,9 +189,9 @@ func (m model) View() string {
 	}
 	filterLine := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf(
 		"[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, q quit",
-		label("side", m.filters.side),
-		label("type", m.filters.typ),
-		label("faction", m.filters.faction),
+		label("side", m.query.Side),
+		label("type", m.query.Type),
+		label("faction", m.query.Faction),
 		m.status,
 	))
 	left := lipgloss.NewStyle().Width(m.listWidth()).Render(m.list.View())
@@ -217,7 +199,7 @@ func (m model) View() string {
 	return filterLine + "\n" + body + "\n" + filterLine
 }
 
-const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [code]
+const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd] [code]
 
 Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
@@ -235,6 +217,8 @@ func main() {
 			opts.Plain = true
 		case "--no-icons":
 			opts.Icons = false
+		case "--nerd":
+			opts.NerdIcons = true
 		case "--width":
 			i++
 			if i >= len(args) {
@@ -265,7 +249,7 @@ func main() {
 		return
 	}
 
-	cards, err := carddb.List(db)
+	cards, err := carddb.Run(db, carddb.Query{})
 	if err != nil {
 		fatal(err)
 	}
@@ -276,7 +260,7 @@ func main() {
 		return
 	}
 
-	p := tea.NewProgram(newModel(cards, opts), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(db, opts), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fatal(err)
 	}

@@ -31,9 +31,10 @@ var factionColors = map[string]lipgloss.Color{
 
 // Options controls rendering style.
 type Options struct {
-	Plain bool // no ANSI
-	Width int  // 0 = auto-detect terminal width (fallback 60)
-	Icons bool // show emoji type/faction icons
+	Plain     bool // no ANSI
+	Width     int  // 0 = auto-detect terminal width (fallback 60)
+	Icons     bool // show emoji type/faction icons
+	NerdIcons bool // show nerd-font glyphs instead of emojis (needs a nerd font)
 }
 
 // Default returns options suitable for the current terminal.
@@ -124,6 +125,53 @@ func typeGlyph(t string) string {
 	}
 }
 
+// nerdIcon returns a nerd-font glyph for a card type (private-use area).
+func nerdTypeIcon(t string) string {
+	switch t {
+	case "identity":
+		return "\uf2c2" // id-card
+	case "ice":
+		return "\uf132" // shield
+	case "agenda":
+		return "\uf05b" // bullseye
+	case "event":
+		return "\uf0e7" // bolt
+	case "operation":
+		return "\uf085" // gears
+	case "hardware":
+		return "\uf2db" // microchip
+	case "program":
+		return "\uf121" // code
+	case "resource":
+		return "\uf0c7" // save
+	case "asset":
+		return "\uf1ad" // building
+	case "upgrade":
+		return "\uf062" // arrow-up
+	default:
+		return "\uf02d" // book
+	}
+}
+
+func nerdSideIcon(side string) string {
+	if side == "corp" {
+		return "\uf19c" // building
+	}
+	return "\uf70c" // running person
+}
+
+// icon returns the type icon per the options' style.
+func typeIconFor(opts Options, t string) string {
+	switch {
+	case opts.NerdIcons:
+		return nerdTypeIcon(t)
+	case opts.Icons:
+		return typeIcon(t)
+	default:
+		return typeGlyph(t)
+	}
+}
+
 func factionEmoji(side string) string {
 	if side == "corp" {
 		return "🏢"
@@ -164,6 +212,26 @@ func pill(opts Options, faction string, s stat) string {
 		fallback)
 }
 
+// nerdStatIcon maps the emoji stat icons to nerd-font equivalents.
+func nerdStatIcon(emoji string) string {
+	switch emoji {
+	case "⚡":
+		return "\uf0e7" // bolt
+	case "💪":
+		return "\uf6c3" // dumbbell (nf-md)
+	case "🗑️", "🗑":
+		return "\uf1f8" // trash
+	case "🧠":
+		return "\uf2db" // microchip (memory units)
+	case "🃏":
+		return "\uf02d" // book (deck)
+	case "🔗":
+		return "\uf0c1" // link
+	default:
+		return emoji
+	}
+}
+
 // effectiveWidth resolves opts.Width to a usable content width.
 func effectiveWidth(opts Options) int {
 	w := opts.Width
@@ -184,12 +252,7 @@ func Title(c carddb.Card, opts Options) string {
 	if c.Uniqueness {
 		title = "◆ " + title
 	}
-	icon := ""
-	if opts.Icons {
-		icon = typeIcon(c.Type) + " "
-	} else {
-		icon = typeGlyph(c.Type) + " "
-	}
+	icon := typeIconFor(opts, c.Type) + " "
 	return colorize(opts, c.Faction, icon+title)
 }
 
@@ -205,7 +268,9 @@ func Header(c carddb.Card, opts Options) string {
 	}
 	factionName := strings.Title(strings.ReplaceAll(c.Faction, "-", " ")) //nolint:staticcheck
 	side := ""
-	if opts.Icons {
+	if opts.NerdIcons {
+		side = nerdSideIcon(c.Side) + " "
+	} else if opts.Icons {
 		side = factionEmoji(c.Side) + " "
 	}
 	b.WriteString(dim(opts, fmt.Sprintf("%s · %s%s", strings.Join(sub, ": "), side, factionName)))
@@ -220,6 +285,9 @@ func Stats(c carddb.Card, opts Options) string {
 		pillFaction = ""
 	}
 	addStat := func(icon, label, value string) {
+		if opts.NerdIcons {
+			icon = nerdStatIcon(icon)
+		}
 		if !opts.Icons {
 			icon = ""
 		}

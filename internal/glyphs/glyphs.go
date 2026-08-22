@@ -7,19 +7,19 @@ import (
 
 // Map of netrunner-cards-json symbol tags to unicode glyphs.
 var symbols = map[string]string{
-	"[click]":            "◆",
-	"[credit]":           "⬤",
-	"[link]":             "⌁",
-	"[mu]":               "μ",
-	"[recurring-credit]": "⟳",
-	"[subroutine]":       "⟐",
-	"[trash]":            "✖",
-	"[anarch]":           "ᴀ",
-	"[criminal]":         "ᴄ",
-	"[shaper]":           "ꜱ",
-	"[jinteki]":          "ᴊ",
-	"[haas-bioroid]":     "ʜ",
-	"[nbn]":              "ɴ",
+	"[click]":              "◆",
+	"[credit]":             "⬤",
+	"[link]":               "⌁",
+	"[mu]":                 "μ",
+	"[recurring-credit]":   "⟳",
+	"[subroutine]":         "⟐",
+	"[trash]":              "✖",
+	"[anarch]":             "ᴀ",
+	"[criminal]":           "ᴄ",
+	"[shaper]":             "ꜱ",
+	"[jinteki]":            "ᴊ",
+	"[haas-bioroid]":       "ʜ",
+	"[nbn]":                "ɴ",
 	"[weyland-consortium]": "ᴡ",
 }
 
