@@ -59,8 +59,8 @@ user/terminal concern, documented in the README, not installed by bootstrap.
 ## Current state
 
 - Three-pane layout: browser | preview | deck pane (focused pane bordered)
-- Keys: `j/k g/G Ctrl-d/u` move · `h/l Tab` panes · `/` search · `1/2/3`
-  cycle side/type/faction · `Enter` add / select identity · `i` identity
+- Keys: `j/k g/G Ctrl-d/u` move · `h/l Tab` panes · `/` search · `1/2/3/4/5`
+  cycle side/type/faction/pack/cost · `Enter` add / select identity · `i` identity
   picker · `x/X +/-` edit qty · `v` images · `w/e` save/load · `q` quit
 - Live footer shows top validation issues; summary line shows cards/min,
   influence used/limit, agenda points/range
@@ -87,8 +87,9 @@ Ordered by what unblocks the rest:
    instead of NLP over rules text.
 6. **Export formats** — NRDB/JNet/OCTGN output next to the plain-text format;
    natural home is `internal/deck` (`EncodeTo(format)`).
-7. **Query power-ups** — expose more `carddb.Query` dimensions in the UI
-   (pack cycling key `4`, cost range) once the builder core is settled.
+7. **Query power-ups** — pack cycling (key `4`) and a max-cost cap (key `5`) ship
+   in both TUIs; the compiled SQL is shown live under the panes. Remaining
+   ideas: cost *ranges* (min+max), strength/memory bounds, rules-text search.
 8. **Image polish** — cache misses should offer to fetch on demand
    (`scripts/nr-fetch-images.sh <code>`); consider thumbnails in the browser
    list if kitty unicode placeholders stabilize upstream.

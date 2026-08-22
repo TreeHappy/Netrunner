@@ -80,6 +80,7 @@ type model struct {
 	imageMode bool
 	file      string
 	status    string
+	packs     []string // distinct pack codes, for the pack-cycling filter
 
 	focus  focus
 	width  int
@@ -91,7 +92,7 @@ type model struct {
 	quitting bool
 }
 
-func newModel(db carddb.DB, opts render.Options, file string) model {
+func newModel(db carddb.DB, opts render.Options, file string, packs []string) model {
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 40, 24)
 	l.Title = "Netrunner cards"
 	l.SetShowStatusBar(false)
@@ -101,7 +102,7 @@ func newModel(db carddb.DB, opts render.Options, file string) model {
 	l.KeyMap.CursorDown.SetKeys("down", "j")
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	return model{db: db, list: l, spinner: sp, opts: opts, file: file,
+	return model{db: db, list: l, spinner: sp, opts: opts, file: file, packs: packs,
 		d: &deck.Deck{}, pending: map[string]bool{}, failed: map[string]bool{},
 		status: "no identity yet — press i to pick one"}
 }
@@ -325,6 +326,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			cycle(&m.query.Faction, factions)
 			return m, m.refresh()
+		case "4":
+			m.cyclePack()
+			return m, m.refresh()
+		case "5":
+			cur := costUnset
+			if m.query.MaxCost != nil {
+				cur = *m.query.MaxCost
+			}
+			m.query.MaxCost = carddb.IntPtr(nextCostCap(cur))
+			return m, m.refresh()
 		case "v":
 			m.imageMode = !m.imageMode
 			if m.imageMode && !image.Supported() {
@@ -446,6 +457,37 @@ func (m *model) syncDeckOff() {
 	}
 }
 
+// cyclePack advances the pack filter through the distinct pack codes in
+// the cache ("" = all first). No-op when the cache has no packs.
+func (m *model) cyclePack() {
+	if len(m.packs) == 0 {
+		return
+	}
+	idx := 0
+	for i, p := range m.packs {
+		if p == m.query.Pack {
+			idx = i
+			break
+		}
+	}
+	m.query.Pack = m.packs[(idx+1)%len(m.packs)]
+}
+
+// costCaps is the max-cost ladder the cost filter cycles through.
+var costCaps = []int{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9} // -1 = no cap
+
+const costUnset = -1
+
+// nextCostCap returns the cap following c (wrapping back to "no cap").
+func nextCostCap(c int) int {
+	for i, v := range costCaps {
+		if v == c {
+			return costCaps[(i+1)%len(costCaps)]
+		}
+	}
+	return costUnset
+}
+
 func cycle(v *string, values []string) {
 	for i, s := range values {
 		if s == *v {
@@ -503,7 +545,9 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-func bodyHeight(total int) int { return max(6, total-5) }
+// bodyHeight is the pane height: total minus pane borders/title and the
+// three lines below (status, SQL, help).
+func bodyHeight(total int) int { return max(6, total-6) }
 
 func (m model) paneStyle(w, h int, focused bool) lipgloss.Style {
 	s := lipgloss.NewStyle().
@@ -609,8 +653,11 @@ func (m model) View() string {
 		}
 		foot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6666")).Render(strings.Join(msgs, "; "))
 	}
-	help := inactive.Render("j/k move · h/l panes · enter add · x/X del · +/- qty · i identity · v img · w save · e load · q quit")
-	return body + "\n" + foot + "\n" + help
+	// The exact statement the current filter selections compile to; always
+	// visible so the GUI stays honest about what hits DuckDB.
+	sqlLine := inactive.Render(truncate("sql: "+m.query.DebugSQL(), m.width))
+	help := inactive.Render("j/k move · h/l panes · enter add · x/X del · +/- qty · i identity · 4 pack · 5 cost · v img · w save · e load · q quit")
+	return body + "\n" + foot + "\n" + sqlLine + "\n" + help
 }
 
 func influenceOf(d *deck.Deck, e deck.Entry) int {
@@ -670,7 +717,10 @@ func main() {
 	}
 	defer db.Close()
 
-	m := newModel(db, opts, file)
+	// Pack codes for the pack-cycling filter; empty on error (key no-op).
+	packs, _ := carddb.Distinct(db, "pack_code")
+
+	m := newModel(db, opts, file, packs)
 	if file != "" {
 		if b, err := os.ReadFile(file); err == nil {
 			if d, err := deck.Decode(db, string(b)); err == nil {

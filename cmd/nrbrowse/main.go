@@ -47,6 +47,7 @@ type model struct {
 	failed   map[string]bool
 	imageOn  bool
 	query    carddb.Query
+	packs    []string // distinct pack codes for the pack-cycling filter
 	width    int
 	height   int
 	opts     render.Options
@@ -62,7 +63,7 @@ var (
 	types    = []string{"", "agenda", "asset", "event", "hardware", "ice", "identity", "operation", "program", "resource", "upgrade"}
 )
 
-func newModel(db carddb.DB, opts render.Options) model {
+func newModel(db carddb.DB, opts render.Options, packs []string) model {
 	delegate := list.NewDefaultDelegate()
 	l := list.New([]list.Item{}, delegate, 40, 24)
 	l.Title = "Netrunner cards"
@@ -72,7 +73,7 @@ func newModel(db carddb.DB, opts render.Options) model {
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return model{
-		db: db, list: l, spinner: sp, opts: opts,
+		db: db, list: l, spinner: sp, opts: opts, packs: packs,
 		width: 80, height: 24,
 		pending: map[string]bool{}, failed: map[string]bool{},
 		// Images are opt-in: rendering is unreliable across terminals, so
@@ -350,6 +351,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			cycle(&m.query.Faction, factions)
 			return m, m.refresh()
+		case "4":
+			m.cyclePack()
+			return m, m.refresh()
+		case "5":
+			cur := costUnset
+			if m.query.MaxCost != nil {
+				cur = *m.query.MaxCost
+			}
+			m.query.MaxCost = carddb.IntPtr(nextCostCap(cur))
+			return m, m.refresh()
 		case "v":
 			m.imageOn = !m.imageOn
 			if m.imageOn && !image.Supported() {
@@ -378,6 +389,37 @@ func cycle(v *string, values []string) {
 		}
 	}
 	*v = values[0]
+}
+
+// cyclePack advances the pack filter through the distinct pack codes in
+// the cache ("" = all first). No-op when the cache has no packs.
+func (m *model) cyclePack() {
+	if len(m.packs) == 0 {
+		return
+	}
+	idx := 0
+	for i, p := range m.packs {
+		if p == m.query.Pack {
+			idx = i
+			break
+		}
+	}
+	m.query.Pack = m.packs[(idx+1)%len(m.packs)]
+}
+
+// costCaps is the max-cost ladder the cost filter cycles through.
+var costCaps = []int{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9} // -1 = no cap
+
+const costUnset = -1
+
+// nextCostCap returns the cap following c (wrapping back to "no cap").
+func nextCostCap(c int) int {
+	for i, v := range costCaps {
+		if v == c {
+			return costCaps[(i+1)%len(costCaps)]
+		}
+	}
+	return costUnset
 }
 
 func label(name, val string) string {
@@ -409,10 +451,12 @@ func (m model) View() string {
 		return trunc("terminal too small", max(1, m.width))
 	}
 	filterLine := lipgloss.NewStyle().Faint(true).Render(trunc(
-		fmt.Sprintf("[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, v images, q quit",
+		fmt.Sprintf("[1] %s  [2] %s  [3] %s  [4] %s  [5] %s · %s · / search, enter print+quit, v images, q quit",
 			label("side", m.query.Side),
 			label("type", m.query.Type),
 			label("faction", m.query.Faction),
+			label("pack", m.query.Pack),
+			costLabel(m.query),
 			m.status), m.width))
 	bh := m.height - 3
 	if bh < 6 {
@@ -423,12 +467,15 @@ func (m model) View() string {
 	left := paneStyle(lw, bh, true).Render(paneTitle("browser") + "\n" + m.list.View())
 	mid := paneStyle(sw, bh, false).Render(paneTitle("card") + "\n" + m.preview)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, mid)
+	// The exact statement the current filters compile to; always visible so
+	// the GUI stays honest about what hits DuckDB.
+	sqlLine := lipgloss.NewStyle().Faint(true).Render(trunc("sql: "+m.query.DebugSQL(), m.width))
 	// Hard geometry guard: pane content can rewrap inside lipgloss and
 	// grow past its configured height; clip so the view always fits the
 	// terminal exactly (inline images break when the frame scrolls).
-	if rows := strings.Split(body, "\n"); len(rows) > m.height-1 {
+	if rows := strings.Split(body, "\n"); len(rows) > m.height-2 {
 		bottom := rows[len(rows)-1] // preserve the pane bottom border
-		rows = append(rows[:max(1, m.height-2)], bottom)
+		rows = append(rows[:max(1, m.height-3)], bottom)
 		body = strings.Join(rows, "\n")
 	}
 	// ueberzugpp overlays are drawn outside the terminal buffer; report the
@@ -441,7 +488,15 @@ func (m model) View() string {
 			image.HideArt()
 		}
 	}
-	return body + "\n" + filterLine
+	return body + "\n" + sqlLine + "\n" + filterLine
+}
+
+// costLabel renders the cost filter's value for the filter line.
+func costLabel(q carddb.Query) string {
+	if q.MaxCost == nil {
+		return "cost:all"
+	}
+	return fmt.Sprintf("cost:<=%d", *q.MaxCost)
 }
 
 // trunc cuts a plain (ANSI-light) string to w printable cells.
@@ -571,7 +626,11 @@ const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd]
 
 Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
-      v toggle image previews, 1 cycle side, 2 cycle type, 3 cycle faction.
+      1 side · 2 type · 3 faction · 4 pack · 5 cost cap,
+      v toggle image previews.
+
+The filters always compile to one SQL query over the DuckDB cache; the
+exact statement is shown under the panes.
 
 Images are OFF by default (text previews everywhere); press v in the
 browser to try them. The --images flag forces a graphics protocol (also
@@ -600,6 +659,9 @@ func main() {
 		fatal(err)
 	}
 	defer db.Close()
+
+	// Pack codes for the pack-cycling filter; empty on error (key no-op).
+	packs, _ := carddb.Distinct(db, "pack_code")
 
 	if parsed.renderTest != "" {
 		parts := strings.SplitN(parsed.renderTest, "x", 2)
@@ -644,7 +706,7 @@ func main() {
 		return
 	}
 
-	p := tea.NewProgram(newModel(db, opts), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(db, opts, packs), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fatal(err)
 	}
@@ -691,7 +753,7 @@ func sqlNull(v int64) sql.NullInt64 {
 
 // renderTestFrame builds a static UI frame at WxH with sample data.
 func renderTestFrame(w, h int) string {
-	m := newModel(nil, render.Default())
+	m := newModel(nil, render.Default(), nil)
 	m.width, m.height = w, h
 	lw, _ := m.sheetGeometry()
 	m.list.SetSize(lw, h-4)

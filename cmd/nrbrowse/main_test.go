@@ -23,7 +23,7 @@ func TestViewFitsTerminal(t *testing.T) {
 		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
 			t.Setenv("NETRUNNER_IMAGES", filepath.Join(t.TempDir(), "images"))
 			t.Setenv("NETRUNNER_ART", filepath.Join(t.TempDir(), "art"))
-			m := newModel(nil, render.Default())
+			m := newModel(nil, render.Default(), nil)
 			m.width, m.height = w, h
 			lw, _ := m.sheetGeometry()
 			m.list.SetSize(lw, h-4)
@@ -94,7 +94,7 @@ func TestViewDegenerateSizes(t *testing.T) {
 	for _, sz := range sizes {
 		w, h := sz[0], sz[1]
 		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
-			m := newModel(nil, render.Default())
+			m := newModel(nil, render.Default(), nil)
 			m.width, m.height = w, h
 			var view string
 			func() {
@@ -149,7 +149,7 @@ func TestViewFitsWithPayload(t *testing.T) {
 		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
 			t.Setenv("NETRUNNER_IMAGES", filepath.Join(t.TempDir(), "images"))
 			t.Setenv("NETRUNNER_ART", filepath.Join(t.TempDir(), "art"))
-			m := newModel(nil, render.Default())
+			m := newModel(nil, render.Default(), nil)
 			m.width, m.height = w, h
 			lw, _ := m.sheetGeometry()
 			m.list.SetSize(lw, h-4)

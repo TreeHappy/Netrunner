@@ -99,7 +99,7 @@ Keybindings (nvim-style):
 | `j` / `k`, `Ctrl-d` / `Ctrl-u`, `g` / `G` | move, half page, top/bottom |
 | `h` / `l`, `←/→`, `Tab` | switch focus between browser and deck pane |
 | `/` | search title/code in the browser |
-| `1` / `2` / `3` | cycle side / type / faction filters (SQL-backed) |
+| `1` / `2` / `3` / `4` / `5` | cycle side / type / faction / pack / max-cost filters (SQL-backed) |
 | `Enter` | add card to deck · select identity when browsing identities |
 | `i` | browse identities for the current side |
 | `x` / `X` | remove one / all copies of selected deck entry |

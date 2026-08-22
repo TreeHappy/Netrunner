@@ -36,7 +36,7 @@ func TestRepro_GhosttyPodmanGeometry(t *testing.T) {
 		t.Run(fmt.Sprintf("%dx%d", tc.w, tc.h), func(t *testing.T) {
 			t.Setenv("NETRUNNER_IMAGES", filepath.Join(t.TempDir(), "images"))
 			t.Setenv("NETRUNNER_ART", filepath.Join(t.TempDir(), "art"))
-			m := newModel(nil, render.Default())
+			m := newModel(nil, render.Default(), nil)
 			m.width, m.height = tc.w, tc.h
 			m.imageOn = true
 			lw, _ := m.sheetGeometry()
