@@ -75,13 +75,15 @@ func newModel(db carddb.DB, opts render.Options) model {
 		db: db, list: l, spinner: sp, opts: opts,
 		width: 80, height: 24,
 		pending: map[string]bool{}, failed: map[string]bool{},
-		imageOn: image.Supported(), status: imageStatusDefault(),
+		// Images are opt-in: rendering is unreliable across terminals, so
+		// start with text previews and let "v" turn graphics on.
+		imageOn: false, status: imageStatusDefault(),
 	}
 }
 
 func imageStatusDefault() string {
 	if image.Supported() {
-		return "v toggles images"
+		return "images off · v toggles"
 	}
 	return "terminal has no graphics protocol; text previews"
 }
@@ -528,6 +530,18 @@ func errUsage(format string, a ...any) error {
 	return fmt.Errorf(format+":\n%s", append(a, usage)...)
 }
 
+// wantArt reports whether one-shot card output should attempt inline
+// artwork. Rendering is opt-in: only an explicit --images request enables
+// it (bare --images inherits NETRUNNER_IMAGE_PROTOCOL or "auto");
+// off/none/halfblocks keep plain text.
+func wantArt(protocol string) bool {
+	switch strings.ToLower(protocol) {
+	case "", "none", "off", "halfblocks":
+		return false
+	}
+	return true
+}
+
 // renderCardWithArt renders a card sheet with inline artwork when the
 // terminal supports a graphics protocol, downloading and cropping the
 // image on demand. Falls back to plain rendering on any failure.
@@ -559,8 +573,10 @@ Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
       v toggle image previews, 1 cycle side, 2 cycle type, 3 cycle faction.
 
-The --images flag forces a graphics protocol (also via
-NETRUNNER_IMAGE_PROTOCOL), bypassing detection — useful inside tmux/ssh.
+Images are OFF by default (text previews everywhere); press v in the
+browser to try them. The --images flag forces a graphics protocol (also
+via NETRUNNER_IMAGE_PROTOCOL), bypassing detection — useful inside
+tmux/ssh — and enables art for one-shot "nrbrowse <code>" output.
 ueberzugpp uses an overlay daemon; in auto mode it is only tried when no
 inline protocol is detected.
 If a code is given, render that card and exit.`
@@ -606,7 +622,11 @@ func main() {
 			if w == 0 {
 				w = 80
 			}
-			fmt.Println(renderCardWithArt(c, opts, w, 30))
+			if wantArt(parsed.protocol) {
+				fmt.Println(renderCardWithArt(c, opts, w, 30))
+			} else {
+				fmt.Println(render.Card(c, opts))
+			}
 			return
 		}
 		fmt.Println(render.Card(c, opts))
