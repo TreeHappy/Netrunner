@@ -1,0 +1,3 @@
+[submodule "data/netrunner-cards-json"]
+	path = data/netrunner-cards-json
+	url = https://github.com/Null-Signal-Games/netrunner-cards-json.git
