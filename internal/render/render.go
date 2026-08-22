@@ -52,20 +52,29 @@ type ArtBand struct {
 // a graphics-protocol payload over this line (see SpliceArt).
 const ArtSentinel = "\x00ART\x00"
 
-// SpliceArt replaces the artwork band's sentinel row in a rendered sheet
-// with the raw graphics payload, padding the row to w printable cells so
-// layout is unaffected (payloads carry no printable width).
-func SpliceArt(sheet, payload string, w int) string {
+// SpliceArt replaces the artwork band's sentinel row in a rendered (already
+// bordered) sheet with the raw graphics payload. Everything around the
+// sentinel on that line — border glyphs, padding, the rest of the box — is
+// preserved, and padding is recomputed so the row keeps its exact printable
+// width (payloads carry no printable width).
+func SpliceArt(sheet, payload string) string {
 	lines := strings.Split(sheet, "\n")
 	for i, line := range lines {
-		if strings.Contains(line, ArtSentinel) {
-			pad := w - lipgloss.Width(payload)
-			if pad < 0 {
-				pad = 0
-			}
-			lines[i] = payload + strings.Repeat(" ", pad)
-			return strings.Join(lines, "\n")
+		idx := strings.Index(line, ArtSentinel)
+		if idx < 0 {
+			continue
 		}
+		prefix := line[:idx]
+		// Drop the band's filler padding on both sides of the sentinel,
+		// keeping only real content (the closing border glyph).
+		suffix := strings.TrimSpace(line[idx+len(ArtSentinel):])
+		target := lipgloss.Width(line)
+		row := prefix + payload + suffix
+		if pad := target - lipgloss.Width(row); pad > 0 {
+			row += strings.Repeat(" ", pad)
+		}
+		lines[i] = row
+		return strings.Join(lines, "\n")
 	}
 	return sheet
 }

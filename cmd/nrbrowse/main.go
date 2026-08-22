@@ -98,7 +98,7 @@ func (m *model) refresh() tea.Cmd {
 	}
 	m.list.SetItems(items)
 	m.status = fmt.Sprintf("%d cards", len(items))
-	return m.updatePreview()
+	return tea.Batch(clearInlineCmd, m.updatePreview())
 }
 
 // paneInterior returns the card pane's interior rows: total height minus
@@ -186,7 +186,7 @@ func (m *model) updatePreview() tea.Cmd {
 							break
 						}
 					}
-					m.preview = render.SpliceArt(sheet, payload, o.Width)
+					m.preview = render.SpliceArt(sheet, payload)
 				} else {
 					payload = ""
 					for i, ln := range strings.Split(sheet, "\n") {
@@ -237,6 +237,11 @@ func ensureArtCmd(code string) tea.Cmd {
 	}
 }
 
+func clearInlineCmd() tea.Msg {
+	image.ClearInline()
+	return nil
+}
+
 // sheetGeometry returns the browser-list and card-sheet interior widths so
 // that both panes including borders sum exactly to the terminal width.
 func (m model) sheetGeometry() (lw, sw int) {
@@ -277,7 +282,7 @@ func hideArtCmd() tea.Msg {
 
 func (m *model) quit() (tea.Model, tea.Cmd) {
 	m.quitting = true
-	return m, tea.Sequence(hideArtCmd, tea.Quit)
+	return m, tea.Sequence(hideArtCmd, clearInlineCmd, tea.Quit)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -293,7 +298,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loaded = true
 			return m, m.refresh()
 		}
-		return m, m.updatePreview()
+		return m, tea.Batch(clearInlineCmd, m.updatePreview())
 
 	case artFetchedMsg:
 		delete(m.pending, msg.code)
@@ -329,6 +334,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if sel, ok := m.list.SelectedItem().(item); ok {
 				image.HideArt()
+				image.ClearInline()
 				fmt.Println(render.Card(sel.card, m.opts))
 				m.quitting = true
 				return m, tea.Quit
@@ -349,7 +355,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "image preview " + map[bool]string{true: "on", false: "off"}[m.imageOn]
 			}
-			return m, m.updatePreview()
+			return m, tea.Batch(clearInlineCmd, m.updatePreview())
 		}
 	}
 
@@ -357,7 +363,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prev := m.list.SelectedItem()
 	m.list, cmd = m.list.Update(msg)
 	if m.list.SelectedItem() != prev {
-		cmd = m.updatePreview()
+		cmd = tea.Batch(clearInlineCmd, m.updatePreview())
 	}
 	return m, cmd
 }
@@ -543,7 +549,7 @@ func renderCardWithArt(c carddb.Card, opts render.Options, width, height int) st
 	o.Width = width // Card() output spans exactly this many columns
 	o.ArtBand = &render.ArtBand{W: iw, H: ih}
 	o.ArtNote = ""
-	return render.SpliceArt(render.Card(c, o), payload, o.Width)
+	return render.SpliceArt(render.Card(c, o), payload)
 }
 
 const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd]

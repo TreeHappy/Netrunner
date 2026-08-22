@@ -112,6 +112,72 @@ func TestViewDegenerateSizes(t *testing.T) {
 	}
 }
 
+// TestSpliceArtPreservesRow verifies the spliced row keeps its printable
+// width and border glyphs.
+func TestSpliceArtPreservesRow(t *testing.T) {
+	c := sampleCards()[1]
+	o := render.Default()
+	o.Width = 60
+	o.ArtBand = &render.ArtBand{W: 30, H: 6}
+	sheet := render.Card(c, o)
+	payload := "\x1b_Gf=100,s=10,v=5\x1b\\fake" // zero-width control + marker
+	spliced := render.SpliceArt(sheet, payload)
+
+	sheetRows := strings.Split(sheet, "\n")
+	rows := strings.Split(spliced, "\n")
+	if len(rows) != len(sheetRows) {
+		t.Fatalf("row count changed: %d -> %d", len(sheetRows), len(rows))
+	}
+	for i := range rows {
+		wSheet, wSpliced := lipgloss.Width(sheetRows[i]), lipgloss.Width(rows[i])
+		if wSheet != wSpliced {
+			t.Errorf("row %d width %d -> %d", i, wSheet, wSpliced)
+		}
+		if strings.Contains(sheetRows[i], render.ArtSentinel) {
+			if !strings.HasPrefix(rows[i], "│") || !strings.HasSuffix(strings.TrimRight(rows[i], " "), "│") {
+				t.Errorf("row %d lost border glyphs: %q", i, ansi.Strip(rows[i]))
+			}
+		}
+	}
+}
+
+// TestViewFitsWithPayload injects a simulated zero-width image payload into
+// the preview band and checks the frame still fits the terminal.
+func TestViewFitsWithPayload(t *testing.T) {
+	for _, sz := range [][2]int{{80, 24}, {140, 50}, {200, 60}} {
+		w, h := sz[0], sz[1]
+		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+			t.Setenv("NETRUNNER_IMAGES", filepath.Join(t.TempDir(), "images"))
+			t.Setenv("NETRUNNER_ART", filepath.Join(t.TempDir(), "art"))
+			m := newModel(nil, render.Default())
+			m.width, m.height = w, h
+			lw, _ := m.sheetGeometry()
+			m.list.SetSize(lw, h-4)
+			items := make([]list.Item, len(sampleCards()))
+			for i, c := range sampleCards() {
+				items[i] = item{card: c}
+			}
+			if err := m.list.SetItems(items); err != nil {
+				t.Fatal(err)
+			}
+			for _, it := range sampleCards() {
+				m.pending[it.Code] = true
+			}
+			if cmd := m.updatePreview(); cmd != nil {
+				t.Fatal("updatePreview should not start fetches in tests")
+			}
+			// Simulate an inline payload spliced over the sentinel row.
+			m.preview = render.SpliceArt(m.preview, "\x1b_Ga=d,q=1\x1b\\")
+			view := m.View()
+			for i, line := range strings.Split(view, "\n") {
+				if wd := ansi.StringWidth(line); wd > w {
+					t.Errorf("line %d is %d columns (terminal %d)", i, wd, w)
+				}
+			}
+		})
+	}
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name     string

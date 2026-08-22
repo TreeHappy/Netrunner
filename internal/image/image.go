@@ -229,13 +229,22 @@ func Card(code string, width, height int) (string, int, int) {
 	if err != nil {
 		return "", 0, 0
 	}
-	widget.SetSizeWithCorrection(width, height).SetProtocol(forcedOrAuto())
+	// Size the widget ourselves: SetSizeWithCorrection can exceed the
+	// requested box for portrait images, which breaks sheet layout.
+	wpx, hpx, ok := imageSize(p)
+	if !ok {
+		return "", 0, 0
+	}
+	wc, hc := fitCells(wpx, hpx, width, height)
+	if wc == 0 {
+		return "", 0, 0
+	}
+	widget.SetSize(wc, hc).SetProtocol(forcedOrAuto())
 	s, err := widget.Render()
 	if err != nil {
 		return "", 0, 0
 	}
-	w, h := widget.GetSize()
-	r := rendered{s, w, h}
+	r := rendered{s, wc, hc}
 	renderCache.Store(key, r)
 	return r.payload, r.w, r.h
 }
@@ -297,4 +306,29 @@ func FetchWithArt(code string) (string, error) {
 func Fetching(code string) bool {
 	_, ok := fetching.Load(code)
 	return ok
+}
+
+// kittyDeleteAll is the kitty graphics control that deletes all placements
+// and image data ("q=1" suppresses the OK response).
+const kittyDeleteAll = "\x1b_Ga=d,d=A,q=1\x1b\\"
+
+// ClearInline erases any inline-protocol images (kitty) currently painted
+// in the terminal. Kitty placements persist until explicitly deleted;
+// without this they survive frame repaints. No-op for other protocols or
+// when not writing to a terminal.
+func ClearInline() {
+	if forceProtocol == termimg.Halfblocks {
+		return
+	}
+	if forceProtocol != 0 && forceProtocol != termimg.Kitty {
+		return
+	}
+	if forceProtocol == 0 && detectInline() != termimg.Kitty {
+		return
+	}
+	fi, err := os.Stdout.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return
+	}
+	fmt.Print(kittyDeleteAll)
 }

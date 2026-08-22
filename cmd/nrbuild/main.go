@@ -176,7 +176,7 @@ func (m *model) updatePreview() tea.Cmd {
 		}
 	}
 	if payload != "" && m.imageMode {
-		m.preview = render.SpliceArt(m.preview, payload, o.Width)
+		m.preview = render.SpliceArt(m.preview, payload)
 	} else if image.UseUeberzug() {
 		image.HideArt()
 	}
