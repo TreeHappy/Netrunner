@@ -73,6 +73,7 @@ func newModel(db carddb.DB, opts render.Options) model {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return model{
 		db: db, list: l, spinner: sp, opts: opts,
+		width: 80, height: 24,
 		pending: map[string]bool{}, failed: map[string]bool{},
 		imageOn: image.Supported(), status: imageStatusDefault(),
 	}
@@ -394,6 +395,11 @@ func (m model) View() string {
 	if m.quitting {
 		return ""
 	}
+	if m.width < 20 || m.height < 6 {
+		// Degenerate terminal (or View before the first WindowSizeMsg):
+		// the pane geometry math needs sane dimensions to work with.
+		return trunc("terminal too small", max(1, m.width))
+	}
 	filterLine := lipgloss.NewStyle().Faint(true).Render(trunc(
 		fmt.Sprintf("[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, v images, q quit",
 			label("side", m.query.Side),
@@ -414,7 +420,7 @@ func (m model) View() string {
 	// terminal exactly (inline images break when the frame scrolls).
 	if rows := strings.Split(body, "\n"); len(rows) > m.height-1 {
 		bottom := rows[len(rows)-1] // preserve the pane bottom border
-		rows = append(rows[:m.height-2], bottom)
+		rows = append(rows[:max(1, m.height-2)], bottom)
 		body = strings.Join(rows, "\n")
 	}
 	// ueberzugpp overlays are drawn outside the terminal buffer; report the

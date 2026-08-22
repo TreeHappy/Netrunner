@@ -87,6 +87,31 @@ func TestCardSheetNeverExceedsWidth(t *testing.T) {
 	}
 }
 
+// TestViewDegenerateSizes ensures View never panics below the minimum
+// geometry (e.g. before the first WindowSizeMsg).
+func TestViewDegenerateSizes(t *testing.T) {
+	sizes := [][2]int{{0, 0}, {10, 2}, {40, 5}, {19, 6}, {80, 1}}
+	for _, sz := range sizes {
+		w, h := sz[0], sz[1]
+		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+			m := newModel(nil, render.Default())
+			m.width, m.height = w, h
+			var view string
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("View panicked at %dx%d: %v", w, h, r)
+					}
+				}()
+				view = m.View()
+			}()
+			if n := strings.Count(view, "\n") + 1; n > max(1, h) {
+				t.Errorf("view has %d rows (terminal %d)", n, h)
+			}
+		})
+	}
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name     string
