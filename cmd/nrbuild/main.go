@@ -82,6 +82,7 @@ type model struct {
 	width  int
 	height int
 	opts   render.Options
+	loaded bool
 
 	quitting bool
 }
@@ -211,6 +212,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		lw, _, _ := paneInteriors(m.width)
 		m.list.SetSize(lw, bodyHeight(m.height)-2)
+		if !m.loaded {
+			m.loaded = true
+			return m, m.refresh()
+		}
 		return m, m.updatePreview()
 
 	case artFetchedMsg:

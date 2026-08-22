@@ -48,6 +48,7 @@ type model struct {
 	opts     render.Options
 	status   string
 	quitting bool
+	loaded   bool
 }
 
 var (
@@ -158,6 +159,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		h := msg.Height - 4
 		m.list.SetSize(m.listWidth(), h)
+		if !m.loaded {
+			m.loaded = true
+			return m, m.refresh()
+		}
 		return m, m.updatePreview()
 
 	case artFetchedMsg:
