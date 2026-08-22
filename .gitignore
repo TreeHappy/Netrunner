@@ -32,5 +32,5 @@ data/netrunner.duckdb.wal
 go.work
 go.work.sum
 profile.cov
-nrbrowse
-nrbuild
+/nrbrowse
+/nrbuild
