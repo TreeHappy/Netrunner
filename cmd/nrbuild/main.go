@@ -67,9 +67,13 @@ type model struct {
 	query   carddb.Query
 	list    list.Model
 	preview string
+	imgW    int
+	imgH    int
+	pending map[string]bool
 
 	d         *deck.Deck
 	deckSel   int
+	deckOff   int
 	imageMode bool
 	file      string
 	status    string
@@ -91,14 +95,14 @@ func newModel(db carddb.DB, opts render.Options, file string) model {
 	l.KeyMap.CursorUp.SetKeys("up", "k")
 	l.KeyMap.CursorDown.SetKeys("down", "j")
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
-	return model{db: db, list: l, opts: opts, file: file, d: &deck.Deck{}, status: "no identity yet — press i to pick one"}
+	return model{db: db, list: l, opts: opts, file: file, d: &deck.Deck{}, pending: map[string]bool{}, status: "no identity yet — press i to pick one"}
 }
 
-func (m *model) refresh() {
+func (m *model) refresh() tea.Cmd {
 	cards, err := carddb.Run(m.db, m.query)
 	if err != nil {
 		m.status = "error: " + err.Error()
-		return
+		return nil
 	}
 	items := make([]list.Item, len(cards))
 	for i, c := range cards {
@@ -106,29 +110,50 @@ func (m *model) refresh() {
 	}
 	m.list.SetItems(items)
 	m.status = fmt.Sprintf("%d cards · %s", len(items), m.query.String())
-	m.updatePreview()
+	return m.updatePreview()
 }
 
-func (m *model) updatePreview() {
+func (m *model) updatePreview() tea.Cmd {
 	sel, ok := m.list.SelectedItem().(item)
 	if !ok {
 		m.preview = ""
-		return
+		return nil
 	}
-	w := m.width - m.listWidth() - m.deckWidth()
-	if w < 30 {
-		w = 30
-	}
+	_, p, _ := paneInteriors(m.width)
+	w := p - 2
+	h := bodyHeight(m.height) - 2
 	if m.imageMode {
-		h := m.height - 6
-		if s := image.Card(sel.card.Code, w, h); s != "" {
-			m.preview = s
-			return
+		payload, iw, ih := image.Card(sel.card.Code, w, h)
+		if payload != "" {
+			m.preview = payload
+			m.imgW, m.imgH = iw, ih
+			return nil
+		}
+		if !image.Supported() {
+			// fall through to text tier below
+		} else if image.Path(sel.card.Code) == "" && !m.pending[sel.card.Code] {
+			code := sel.card.Code
+			m.pending[code] = true
+			m.status = "fetching art… " + code
+			return fetchArtCmd(code)
 		}
 	}
+	m.imgW, m.imgH = 0, 0
 	o := m.opts
-	o.Width = w - 2
+	o.Width = w
 	m.preview = render.Card(sel.card, o)
+	return nil
+}
+
+type artFetchedMsg struct {
+	code string
+	err  error
+}
+
+func fetchArtCmd(code string) tea.Cmd {
+	return func() tea.Msg {
+		return artFetchedMsg{code: code, err: image.Fetch(code)}
+	}
 }
 
 func (m *model) addSelected() {
@@ -184,9 +209,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.list.SetSize(m.listWidth(), msg.Height-5)
-		m.refresh()
-		return m, nil
+		lw, _, _ := paneInteriors(m.width)
+		m.list.SetSize(lw, bodyHeight(m.height)-2)
+		return m, m.updatePreview()
+
+	case artFetchedMsg:
+		delete(m.pending, msg.code)
+		if msg.err != nil {
+			m.status = "no art for " + msg.code
+		}
+		return m, m.updatePreview()
 
 	case tea.KeyMsg:
 		if m.list.FilterState() == list.Filtering {
@@ -210,8 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				side = "corp"
 			}
 			m.query = carddb.Query{Side: side, Type: "identity"}
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "h", "left":
 			m.focus = focusBrowser
 			return m, nil
@@ -229,16 +260,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "1":
 			cycle(&m.query.Side, sides)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "2":
 			cycle(&m.query.Type, types)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "3":
 			cycle(&m.query.Faction, factions)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "v":
 			m.imageMode = !m.imageMode
 			if m.imageMode && !image.Supported() {
@@ -246,8 +274,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "image preview " + map[bool]string{true: "on", false: "off"}[m.imageMode]
 			}
-			m.updatePreview()
-			return m, nil
+			return m, m.updatePreview()
 		case "w":
 			return m, m.save()
 		case "e":
@@ -258,18 +285,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "j", "down":
 				if m.deckSel < len(m.deckEntries())-1 {
 					m.deckSel++
+					m.syncDeckOff()
 				}
 				return m, nil
 			case "k", "up":
 				if m.deckSel > 0 {
 					m.deckSel--
+					m.syncDeckOff()
 				}
 				return m, nil
 			case "g", "home":
 				m.deckSel = 0
+				m.syncDeckOff()
 				return m, nil
 			case "G", "end":
 				m.deckSel = max(0, len(m.deckEntries())-1)
+				m.syncDeckOff()
 				return m, nil
 			case "x":
 				m.removeFromDeck(false)
@@ -298,7 +329,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prev := m.list.SelectedItem()
 	m.list, cmd = m.list.Update(msg)
 	if m.list.SelectedItem() != prev {
-		m.updatePreview()
+		cmd = m.updatePreview()
 	}
 	return m, cmd
 }
@@ -335,10 +366,26 @@ func (m model) load() tea.Cmd {
 	}
 	m.d = d
 	m.deckSel = 0
+	m.syncDeckOff()
 	m.query = carddb.Query{Side: d.Identity.Side}
-	m.refresh()
+	cmd := m.refresh()
 	m.status = "loaded " + path + " (" + strconv.Itoa(d.Size()) + " cards)"
+	_ = cmd
 	return nil
+}
+
+// syncDeckOff keeps the selected deck entry inside the visible viewport.
+func (m *model) syncDeckOff() {
+	h := bodyHeight(m.height) - 2
+	if m.deckSel < m.deckOff {
+		m.deckOff = m.deckSel
+	}
+	if m.deckSel >= m.deckOff+h {
+		m.deckOff = m.deckSel - h + 1
+	}
+	if m.deckOff < 0 {
+		m.deckOff = 0
+	}
 }
 
 func cycle(v *string, values []string) {
@@ -358,26 +405,103 @@ func label(name, val string) string {
 	return name + ":" + val
 }
 
-func (m model) listWidth() int {
-	w := m.width / 4
-	if w < 30 {
-		w = 30
+// paneInteriors splits the terminal width into the three pane *interior*
+// widths. Borders are always drawn on every pane (2 columns each), so
+// l+p+d+6 == total whenever total >= minTotal; below that we overflow
+// gracefully instead of clipping the right pane.
+func paneInteriors(total int) (l, p, d int) {
+	const (
+		minL, minP, minD = 24, 14, 28
+		borderTotal      = 6
+	)
+	inner := total - borderTotal
+	l = clamp(inner*26/100, minL, 38)
+	d = clamp(inner*27/100, minD, 44)
+	p = inner - l - d
+	if p < minP {
+		p = minP
 	}
-	if w > 46 {
-		w = 46
+	// Overflow guard for narrow terminals: shrink panes down to hard minimums.
+	for l+p+d > inner && (l > 18 || p > 8 || d > 20) {
+		switch {
+		case l >= d && l >= p && l > 18:
+			l--
+		case d >= p && d > 20:
+			d--
+		default:
+			p--
+		}
 	}
-	return w
+	return l, p, d
 }
 
-func (m model) deckWidth() int {
-	w := m.width / 4
-	if w < 34 {
-		w = 34
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
 	}
-	if w > 52 {
-		w = 52
+	if v > hi {
+		return hi
 	}
-	return w
+	return v
+}
+
+func bodyHeight(total int) int { return max(6, total-5) }
+
+func (m model) paneStyle(w, h int, focused bool) lipgloss.Style {
+	s := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Width(w).
+		Height(h)
+	if focused {
+		return s.BorderForeground(lipgloss.Color("#88cc88"))
+	}
+	return s.BorderForeground(lipgloss.Color("#444455"))
+}
+
+// paneTitle renders the small header line shown at the top of a pane.
+func paneTitle(s string, focused bool) string {
+	st := lipgloss.NewStyle()
+	if focused {
+		return st.Foreground(lipgloss.Color("#88ff88")).Bold(true).Render("● " + s)
+	}
+	return st.Faint(true).Render("○ " + s)
+}
+
+// previewBlock renders the preview content: the raw graphics payload padded
+// to its cell box in image mode, or the text sheet as-is otherwise.
+func (m model) previewBlock(w int) string {
+	if m.imgW > 0 && m.imgH > 0 {
+		return lipgloss.NewStyle().Width(m.imgW).Height(m.imgH).Render(m.preview)
+	}
+	return m.preview
+}
+
+// deckView renders the deck entries with a scrolling viewport and aligned
+// qty/influence columns.
+func (m model) deckView(w, h int) string {
+	entries := m.deckEntries()
+	var b strings.Builder
+	if len(entries) == 0 {
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render("(empty deck)"))
+	}
+	for i := m.deckOff; i < len(entries) && i < m.deckOff+h; i++ {
+		e := entries[i]
+		cursor := " "
+		style := lipgloss.NewStyle()
+		if i == m.deckSel {
+			cursor = ">"
+			style = style.Bold(true).Foreground(lipgloss.Color("#88ff88"))
+		}
+		inf := ""
+		if v := influenceOf(m.d, e); v > 0 {
+			inf = strconv.Itoa(v)
+		}
+		titleMax := w - 5 - len(inf)
+		title := truncate(e.Card.Title, titleMax)
+		pad := strings.Repeat(" ", max(0, titleMax-len([]rune(title))))
+		fmt.Fprintf(&b, "%s\n", style.Render(fmt.Sprintf("%s%2d %s%s%s", cursor, e.Qty, title, pad, inf)))
+	}
+	return b.String()
 }
 
 func (m model) View() string {
@@ -395,67 +519,36 @@ func (m model) View() string {
 	active := lipgloss.NewStyle().Foreground(lipgloss.Color("#88ff88"))
 	inactive := lipgloss.NewStyle().Faint(true)
 
-	listStyle := lipgloss.NewStyle().Width(m.listWidth())
-	if m.focus == focusBrowser {
-		listStyle = listStyle.Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#5577aa"))
-	}
-	left := listStyle.Render(m.list.View())
+	lw, pw, dw := paneInteriors(m.width)
+	bh := bodyHeight(m.height)
 
-	previewWidth := m.width - m.listWidth() - m.deckWidth()
-	center := lipgloss.NewStyle().Width(max(20, previewWidth)).Render(m.preview)
+	focusBrowserPane := m.focus == focusBrowser
+	left := m.paneStyle(lw, bh, focusBrowserPane).Render(
+		paneTitle("browser", focusBrowserPane) + "\n" + m.list.View())
+	center := m.paneStyle(pw, bh, false).Render(
+		paneTitle("preview", false) + "\n" + m.previewBlock(pw-2))
 
-	deckStyle := lipgloss.NewStyle().Width(m.deckWidth())
-	if m.focus == focusDeck {
-		deckStyle = deckStyle.Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#88cc88"))
-	} else {
-		deckStyle = deckStyle.Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#444444"))
-	}
-	deckStyle = deckStyle.Height(m.height - 5)
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", bar(inactive))
 	id := "(no identity)"
 	if m.d.Identity.Type == "identity" {
 		id = m.d.Identity.Title
 	}
-	fmt.Fprintf(&b, "%s\n", active.Render("◆ "+id))
-
-	issues := m.d.Validate()
-	summary := m.d.Summary()
-	if len(issues) == 0 && m.d.Identity.Type == "identity" {
-		summary = "✓ " + summary
-	}
-	fmt.Fprintf(&b, "%s\n", summary)
-
-	for i, e := range m.deckEntries() {
-		cursor := " "
-		style := lipgloss.NewStyle()
-		if i == m.deckSel {
-			cursor = ">"
-			style = style.Bold(true)
-		}
-		line := fmt.Sprintf("%s%dx %s", cursor, e.Qty, e.Card.Title)
-		if inf := influenceOf(m.d, e); inf > 0 {
-			line += fmt.Sprintf(" (%d)", inf)
-		}
-		fmt.Fprintln(&b, style.Render(truncate(line, m.deckWidth()-4)))
-	}
-
-	right := deckStyle.Render(b.String())
+	focusDeckPane := m.focus == focusDeck
+	right := m.paneStyle(dw, bh, focusDeckPane).Render(
+		paneTitle("deck · ◆ "+id, focusDeckPane) + "\n" + m.deckView(dw-2, bh-3))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
 
+	issues := m.d.Validate()
 	foot := bar(active)
 	if len(issues) > 0 {
 		msgs := make([]string, 0, min(3, len(issues)))
 		for _, iss := range issues[:min(3, len(issues))] {
 			msgs = append(msgs, "✗ "+iss.Msg)
 		}
-		extra := ""
 		if len(issues) > 3 {
-			extra = fmt.Sprintf(" … +%d more", len(issues)-3)
+			msgs = append(msgs, fmt.Sprintf("… +%d more", len(issues)-3))
 		}
-		foot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6666")).Render(strings.Join(msgs, "; ") + extra)
+		foot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6666")).Render(strings.Join(msgs, "; "))
 	}
 	help := inactive.Render("j/k move · h/l panes · enter add · x/X del · +/- qty · i identity · v img · w save · e load · q quit")
 	return body + "\n" + foot + "\n" + help

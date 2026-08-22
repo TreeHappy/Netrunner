@@ -116,3 +116,20 @@ Identity: 30077
 3x 01041
 2x 02086
 ```
+
+Card artwork is fetched on demand from NetrunnerDB's public card-image CDN
+and cached under the XDG user cache directory (`~/.cache/netrunner/
+card-images`, override with `NETRUNNER_IMAGES`). It is never stored in the
+repository.
+
+## License
+
+The code in this repository is licensed under the [MIT License](LICENSE).
+
+Android: Netrunner and all card names, rules text, and artwork are the
+property of Fantasy Flight Games, Wizards of the Coast, and Null Signal
+Games. Card data is sourced from [NetrunnerDB](https://netrunnerdb.com) and
+card images from its public CDN; this tool caches them locally for personal
+use only and ships none of them. Nothing in this repository grants any
+right to redistribute that content.
+

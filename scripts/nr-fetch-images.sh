@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Download card artwork into data/card-images/<code>.jpg for terminal image
-# rendering (kitty/sixel). Idempotent: skips already-downloaded images.
+# Download card artwork into the local image cache for terminal image
+# rendering (kitty/sixel). Default destination is the XDG cache dir
+# (~/.cache/netrunner/card-images); override with NETRUNNER_IMAGES.
+# Idempotent: skips already-downloaded images.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$ROOT/data/card-images"
+DEST="${NETRUNNER_IMAGES:-${XDG_CACHE_HOME:-$HOME/.cache}/netrunner/card-images}"
 DB="$ROOT/data/netrunner.duckdb"
 JOBS="${JOBS:-16}"
 

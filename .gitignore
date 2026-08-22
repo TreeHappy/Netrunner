@@ -25,6 +25,7 @@
 .cache/
 .env
 coverage.*
+# third-party copyrighted artwork — cached locally, never committed
 data/card-images/
 data/netrunner.duckdb
 data/netrunner.duckdb.wal
