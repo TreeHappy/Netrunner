@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -20,8 +21,8 @@ import (
 	termimg "github.com/blacktop/go-termimg"
 )
 
-// Dir returns the card image cache directory. Defaults to the XDG user
-// cache dir (~/.cache on Linux), overridable with NETRUNNER_IMAGES.
+// Dir returns the original card-scan cache directory. Defaults to the XDG
+// user cache dir (~/.cache on Linux), overridable with NETRUNNER_IMAGES.
 func Dir() string {
 	if d := os.Getenv("NETRUNNER_IMAGES"); d != "" {
 		return d
@@ -33,7 +34,20 @@ func Dir() string {
 	return filepath.Join(base, "netrunner", "card-images")
 }
 
-// Path is the cached image path for a card code ("" if absent).
+// ArtDir returns the cropped-artwork cache directory (image-only crops of
+// the full scans kept in Dir).
+func ArtDir() string {
+	if d := os.Getenv("NETRUNNER_ART"); d != "" {
+		return d
+	}
+	return filepath.Join(filepath.Dir(Dir()), "card-art")
+}
+
+// artBox is the artwork band as percentages of the card scan
+// (x, y, w, h): title band above, text box below.
+var artBox = [4]float64{4, 11, 92, 52}
+
+// Path is the cached full-scan path for a card code ("" if absent).
 func Path(code string) string {
 	for _, ext := range []string{".jpg", ".png"} {
 		p := filepath.Join(Dir(), code+ext)
@@ -42,6 +56,50 @@ func Path(code string) string {
 		}
 	}
 	return ""
+}
+
+// ArtPath is the cropped artwork path for a card code ("" if absent).
+func ArtPath(code string) string {
+	p := filepath.Join(ArtDir(), code+".jpg")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
+
+// EnsureArt crops the card's cached scan down to the artwork band using
+// ImageMagick, writing into ArtDir. Originals are never modified. Returns
+// the artwork path ("" when the source scan or magick is missing).
+func EnsureArt(code string) string {
+	if p := ArtPath(code); p != "" {
+		return p
+	}
+	src := Path(code)
+	if src == "" {
+		return ""
+	}
+	magick, err := exec.LookPath("magick")
+	if err != nil {
+		if magick, err = exec.LookPath("convert"); err != nil {
+			return ""
+		}
+	}
+	if err := os.MkdirAll(ArtDir(), 0o755); err != nil {
+		return ""
+	}
+	dst := filepath.Join(ArtDir(), code+".jpg")
+	box := artBox
+	geo := fmt.Sprintf("%g%%x%g%%+%g%%+%g%%", box[2], box[3], box[0], box[1])
+	cmd := exec.Command(magick, src, "-crop", geo, "+repage", "-quality", "90", dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(dst)
+		_ = out
+		return ""
+	}
+	if ArtPath(code) == "" {
+		return ""
+	}
+	return dst
 }
 
 // Supported reports whether the terminal can show real images.
@@ -59,16 +117,19 @@ var (
 	fetching    sync.Map // code -> bool
 )
 
-// Card renders the card's cached image scaled to fit within width×height
-// cells while preserving aspect ratio. It returns the raw protocol payload
-// (emit unstyled) and the number of cells it actually occupies. Returns
-// empty payload when unsupported or not cached; renders are cached per
-// (card, size).
+// Card renders the card's artwork (cropped art when available, else the
+// full scan) scaled to fit within width×height cells while preserving
+// aspect ratio. It returns the raw protocol payload (emit unstyled) and
+// the number of cells it actually occupies. Returns empty payload when
+// unsupported or not cached; renders are cached per (card, size).
 func Card(code string, width, height int) (string, int, int) {
 	if !Supported() || width < 4 || height < 4 {
 		return "", 0, 0
 	}
-	p := Path(code)
+	p := ArtPath(code)
+	if p == "" {
+		p = Path(code)
+	}
 	if p == "" {
 		return "", 0, 0
 	}
@@ -133,6 +194,16 @@ func Fetch(code string) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// FetchWithArt downloads the scan and then crops artwork. Returns the
+// cropped art path ("" if cropping unavailable) and any fetch error.
+func FetchWithArt(code string) (string, error) {
+	err := Fetch(code)
+	if err != nil {
+		return "", err
+	}
+	return EnsureArt(code), nil
 }
 
 // Fetching reports whether a fetch for code is in flight.

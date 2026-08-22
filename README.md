@@ -64,8 +64,11 @@ scripts/nr-build-cache.sh
 ### Optional: card artwork for terminal image rendering
 
 ```sh
-scripts/nr-fetch-images.sh     # downloads card images into data/card-images/
+scripts/nr-fetch-images.sh     # downloads card scans (also fetched on demand by the TUIs)
 ```
+
+Requires [mise](https://mise.jdx.dev)-installed ImageMagick (`mise use -g imagemagick`)
+for cropping; the TUIs crop artwork automatically after download.
 
 With images cached, open the browser or deck builder in a graphics-capable
 terminal (kitty, WezTerm, ghostty, foot, …) and press `v` to toggle image
@@ -118,9 +121,10 @@ Identity: 30077
 ```
 
 Card artwork is fetched on demand from NetrunnerDB's public card-image CDN
-and cached under the XDG user cache directory (`~/.cache/netrunner/
-card-images`, override with `NETRUNNER_IMAGES`). It is never stored in the
-repository.
+and cached under the XDG user cache directory: full scans in
+`~/.cache/netrunner/card-images`, artwork-only crops (made with ImageMagick)
+in `~/.cache/netrunner/card-art` (override with `NETRUNNER_IMAGES` /
+`NETRUNNER_ART`). It is never stored in the repository.
 
 ## License
 

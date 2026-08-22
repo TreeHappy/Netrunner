@@ -11,6 +11,7 @@ import (
 	"boardy/netrunner/internal/render"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -37,10 +38,10 @@ type model struct {
 	db       carddb.DB
 	cards    []carddb.Card
 	list     list.Model
+	spinner  spinner.Model
 	preview  string
-	imgW     int
-	imgH     int
 	pending  map[string]bool
+	failed   map[string]bool
 	imageOn  bool
 	query    carddb.Query
 	width    int
@@ -65,7 +66,12 @@ func newModel(db carddb.DB, opts render.Options) model {
 	l.SetFilteringEnabled(true)
 	l.FilterInput.Placeholder = "search title/code…"
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
-	return model{db: db, list: l, opts: opts, pending: map[string]bool{}, imageOn: image.Supported(), status: imageStatusDefault()}
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	return model{
+		db: db, list: l, spinner: sp, opts: opts,
+		pending: map[string]bool{}, failed: map[string]bool{},
+		imageOn: image.Supported(), status: imageStatusDefault(),
+	}
 }
 
 func imageStatusDefault() string {
@@ -96,28 +102,22 @@ func (m *model) updatePreview() tea.Cmd {
 		m.preview = ""
 		return nil
 	}
-	w := m.previewWidth()
-	h := m.height - 6
-	if m.imageOn {
-		payload, iw, ih := image.Card(sel.card.Code, w, h)
-		if payload != "" {
-			m.preview = payload
-			m.imgW, m.imgH = iw, ih
-			return nil
-		}
-		if image.Supported() && image.Path(sel.card.Code) == "" && !m.pending[sel.card.Code] {
-			code := sel.card.Code
-			m.pending[code] = true
-			m.status = "fetching art… " + code
-			return fetchArtCmd(code)
-		}
-	}
-	m.imgW, m.imgH = 0, 0
 	o := m.opts
-	if o.Width > w {
-		o.Width = w
+	if o.Width > m.sheetWidth() {
+		o.Width = m.sheetWidth()
 	}
 	m.preview = render.Card(sel.card, o)
+	if !m.imageOn || !image.Supported() {
+		return nil
+	}
+	code := sel.card.Code
+	if payload, _, _ := image.Card(code, m.artWidth(), m.height-6); payload != "" {
+		return nil
+	}
+	if image.Path(code) == "" && !m.pending[code] && !m.failed[code] {
+		m.pending[code] = true
+		return tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+	}
 	return nil
 }
 
@@ -128,16 +128,32 @@ type artFetchedMsg struct {
 
 func fetchArtCmd(code string) tea.Cmd {
 	return func() tea.Msg {
-		return artFetchedMsg{code: code, err: image.Fetch(code)}
+		_, err := image.FetchWithArt(code)
+		return artFetchedMsg{code: code, err: err}
 	}
 }
 
-func (m model) previewWidth() int {
-	w := m.width - m.listWidth() - 4 // list border + image pane borders
-	if w < 30 {
-		w = 30
+func (m model) sheetArtWidths() (sheet, art int) {
+	total := m.width - m.listWidth() - 6
+	sheet = total * 58 / 100
+	art = total - sheet
+	if sheet < 22 {
+		sheet = 22
 	}
-	return w
+	if art < 12 {
+		art = 12
+	}
+	return sheet, art
+}
+
+func (m model) sheetWidth() int {
+	s, _ := m.sheetArtWidths()
+	return s - 2
+}
+
+func (m model) artWidth() int {
+	_, a := m.sheetArtWidths()
+	return a - 2
 }
 
 func (m model) listWidth() int {
@@ -168,9 +184,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case artFetchedMsg:
 		delete(m.pending, msg.code)
 		if msg.err != nil {
+			m.failed[msg.code] = true
 			m.status = "no art for " + msg.code
+		} else {
+			m.status = fmt.Sprintf("%d cards", len(m.cards))
 		}
 		return m, m.updatePreview()
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if len(m.pending) > 0 {
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -268,17 +295,40 @@ func (m model) View() string {
 		bh = 6
 	}
 	lw := m.listWidth()
-	pw := m.previewWidth()
-
-	content := m.preview
-	if m.imgW > 0 && m.imgH > 0 {
-		content = lipgloss.NewStyle().Width(m.imgW).Height(m.imgH).Render(m.preview)
-	}
+	sw, aw := m.sheetArtWidths()
 
 	left := paneStyle(lw, bh, true).Render(paneTitle("browser") + "\n" + m.list.View())
-	right := paneStyle(pw, bh, false).Render(paneTitle("preview") + "\n" + content)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	mid := paneStyle(sw, bh, false).Render(paneTitle("card") + "\n" + m.preview)
+	right := paneStyle(aw, bh, false).Render(m.artBlock(aw-2, bh-2))
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, mid, right)
 	return body + "\n" + filterLine
+}
+
+// artBlock renders the artwork pane: cropped image when available, a
+// spinner while fetching, faint placeholders otherwise.
+func (m model) artBlock(w, h int) string {
+	title := paneTitle("artwork")
+	sel, ok := m.list.SelectedItem().(item)
+	if !ok {
+		return title
+	}
+	code := sel.card.Code
+	if payload, iw, ih := image.Card(code, w, h); payload != "" && m.imageOn {
+		return title + "\n" + lipgloss.NewStyle().Width(iw).Height(ih).Render(payload)
+	}
+	var line string
+	faint := lipgloss.NewStyle().Faint(true)
+	switch {
+	case m.pending[code] || image.Fetching(code):
+		line = m.spinner.View() + " fetching art…"
+	case m.failed[code]:
+		line = faint.Render("✗ no art")
+	case image.Path(code) == "":
+		line = faint.Render("(no artwork cached)")
+	default:
+		line = faint.Render("(press v to show)")
+	}
+	return title + "\n" + line
 }
 
 const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd] [code]

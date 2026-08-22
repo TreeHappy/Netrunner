@@ -27,6 +27,7 @@ import (
 	"boardy/netrunner/internal/render"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -66,10 +67,10 @@ type model struct {
 	db      carddb.DB
 	query   carddb.Query
 	list    list.Model
+	spinner spinner.Model
 	preview string
-	imgW    int
-	imgH    int
 	pending map[string]bool
+	failed  map[string]bool
 
 	d         *deck.Deck
 	deckSel   int
@@ -96,7 +97,10 @@ func newModel(db carddb.DB, opts render.Options, file string) model {
 	l.KeyMap.CursorUp.SetKeys("up", "k")
 	l.KeyMap.CursorDown.SetKeys("down", "j")
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
-	return model{db: db, list: l, opts: opts, file: file, d: &deck.Deck{}, pending: map[string]bool{}, status: "no identity yet — press i to pick one"}
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	return model{db: db, list: l, spinner: sp, opts: opts, file: file,
+		d: &deck.Deck{}, pending: map[string]bool{}, failed: map[string]bool{},
+		status: "no identity yet — press i to pick one"}
 }
 
 func (m *model) refresh() tea.Cmd {
@@ -120,29 +124,22 @@ func (m *model) updatePreview() tea.Cmd {
 		m.preview = ""
 		return nil
 	}
-	_, p, _ := paneInteriors(m.width)
-	w := p - 2
-	h := bodyHeight(m.height) - 2
-	if m.imageMode {
-		payload, iw, ih := image.Card(sel.card.Code, w, h)
-		if payload != "" {
-			m.preview = payload
-			m.imgW, m.imgH = iw, ih
-			return nil
-		}
-		if !image.Supported() {
-			// fall through to text tier below
-		} else if image.Path(sel.card.Code) == "" && !m.pending[sel.card.Code] {
-			code := sel.card.Code
-			m.pending[code] = true
-			m.status = "fetching art… " + code
-			return fetchArtCmd(code)
-		}
-	}
-	m.imgW, m.imgH = 0, 0
+	_, s, _, _ := paneInteriors(m.width)
 	o := m.opts
-	o.Width = w
+	o.Width = s - 2
 	m.preview = render.Card(sel.card, o)
+	if !m.imageMode || !image.Supported() {
+		return nil
+	}
+	code := sel.card.Code
+	if payload, _, _ := image.Card(code, m.artWidth(), bodyHeight(m.height)-2); payload != "" {
+		return nil
+	}
+	if image.Path(code) == "" && !m.pending[code] && !m.failed[code] {
+		m.pending[code] = true
+		m.status = "fetching art… " + code
+		return tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+	}
 	return nil
 }
 
@@ -153,7 +150,8 @@ type artFetchedMsg struct {
 
 func fetchArtCmd(code string) tea.Cmd {
 	return func() tea.Msg {
-		return artFetchedMsg{code: code, err: image.Fetch(code)}
+		_, err := image.FetchWithArt(code)
+		return artFetchedMsg{code: code, err: err}
 	}
 }
 
@@ -210,7 +208,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		lw, _, _ := paneInteriors(m.width)
+		lw, _, _, _ := paneInteriors(m.width)
 		m.list.SetSize(lw, bodyHeight(m.height)-2)
 		if !m.loaded {
 			m.loaded = true
@@ -221,9 +219,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case artFetchedMsg:
 		delete(m.pending, msg.code)
 		if msg.err != nil {
+			m.failed[msg.code] = true
 			m.status = "no art for " + msg.code
 		}
 		return m, m.updatePreview()
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if len(m.pending) > 0 {
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.list.FilterState() == list.Filtering {
@@ -410,34 +417,38 @@ func label(name, val string) string {
 	return name + ":" + val
 }
 
-// paneInteriors splits the terminal width into the three pane *interior*
-// widths. Borders are always drawn on every pane (2 columns each), so
-// l+p+d+6 == total whenever total >= minTotal; below that we overflow
-// gracefully instead of clipping the right pane.
-func paneInteriors(total int) (l, p, d int) {
+// paneInteriors splits the terminal width into the four pane *interior*
+// widths (browser, card sheet, artwork, deck). Borders are always drawn on
+// every pane (2 columns each), so the sum plus borders equals total
+// whenever space allows; below that we overflow gracefully instead of
+// clipping the right pane.
+func paneInteriors(total int) (l, s, a, d int) {
 	const (
-		minL, minP, minD = 24, 14, 28
-		borderTotal      = 6
+		minL, minS, minA, minD = 22, 18, 10, 26
+		borderTotal            = 8
 	)
 	inner := total - borderTotal
-	l = clamp(inner*26/100, minL, 38)
-	d = clamp(inner*27/100, minD, 44)
-	p = inner - l - d
-	if p < minP {
-		p = minP
+	l = clamp(inner*24/100, minL, 38)
+	d = clamp(inner*25/100, minD, 42)
+	s = clamp(inner*29/100, minS, 34)
+	a = inner - l - d - s
+	if a < minA {
+		a = minA
 	}
 	// Overflow guard for narrow terminals: shrink panes down to hard minimums.
-	for l+p+d > inner && (l > 18 || p > 8 || d > 20) {
+	for l+s+a+d > inner && (l > 16 || s > 12 || a > 6 || d > 18) {
 		switch {
-		case l >= d && l >= p && l > 18:
-			l--
-		case d >= p && d > 20:
+		case s >= a && s >= d && s >= l && s > 12:
+			s--
+		case d >= a && d >= l && d > 18:
 			d--
+		case l >= a && l > 16:
+			l--
 		default:
-			p--
+			a--
 		}
 	}
-	return l, p, d
+	return l, s, a, d
 }
 
 func clamp(v, lo, hi int) int {
@@ -451,6 +462,12 @@ func clamp(v, lo, hi int) int {
 }
 
 func bodyHeight(total int) int { return max(6, total-5) }
+
+// artWidth is the artwork pane's interior width.
+func (m model) artWidth() int {
+	_, _, a, _ := paneInteriors(m.width)
+	return a - 2
+}
 
 func (m model) paneStyle(w, h int, focused bool) lipgloss.Style {
 	s := lipgloss.NewStyle().
@@ -472,13 +489,31 @@ func paneTitle(s string, focused bool) string {
 	return st.Faint(true).Render("○ " + s)
 }
 
-// previewBlock renders the preview content: the raw graphics payload padded
-// to its cell box in image mode, or the text sheet as-is otherwise.
-func (m model) previewBlock(w int) string {
-	if m.imgW > 0 && m.imgH > 0 {
-		return lipgloss.NewStyle().Width(m.imgW).Height(m.imgH).Render(m.preview)
+// artBlock renders the artwork pane: cropped image when available, a
+// spinner while fetching, faint placeholders otherwise.
+func (m model) artBlock(w, h int) string {
+	title := paneTitle("artwork", false)
+	sel, ok := m.list.SelectedItem().(item)
+	if !ok {
+		return title
 	}
-	return m.preview
+	code := sel.card.Code
+	if payload, iw, ih := image.Card(code, w, h); payload != "" && m.imageMode {
+		return title + "\n" + lipgloss.NewStyle().Width(iw).Height(ih).Render(payload)
+	}
+	var line string
+	faint := lipgloss.NewStyle().Faint(true)
+	switch {
+	case m.pending[code] || image.Fetching(code):
+		line = m.spinner.View() + " fetching art…"
+	case m.failed[code]:
+		line = faint.Render("✗ no art")
+	case image.Path(code) == "":
+		line = faint.Render("(no artwork cached)")
+	default:
+		line = faint.Render("(press v to show)")
+	}
+	return title + "\n" + line
 }
 
 // deckView renders the deck entries with a scrolling viewport and aligned
@@ -524,14 +559,15 @@ func (m model) View() string {
 	active := lipgloss.NewStyle().Foreground(lipgloss.Color("#88ff88"))
 	inactive := lipgloss.NewStyle().Faint(true)
 
-	lw, pw, dw := paneInteriors(m.width)
+	lw, sw, aw, dw := paneInteriors(m.width)
 	bh := bodyHeight(m.height)
 
 	focusBrowserPane := m.focus == focusBrowser
 	left := m.paneStyle(lw, bh, focusBrowserPane).Render(
 		paneTitle("browser", focusBrowserPane) + "\n" + m.list.View())
-	center := m.paneStyle(pw, bh, false).Render(
-		paneTitle("preview", false) + "\n" + m.previewBlock(pw-2))
+	sheet := m.paneStyle(sw, bh, false).Render(
+		paneTitle("card", false) + "\n" + m.preview)
+	art := m.paneStyle(aw, bh, false).Render(m.artBlock(aw-2, bh-2))
 
 	id := "(no identity)"
 	if m.d.Identity.Type == "identity" {
@@ -541,7 +577,7 @@ func (m model) View() string {
 	right := m.paneStyle(dw, bh, focusDeckPane).Render(
 		paneTitle("deck · ◆ "+id, focusDeckPane) + "\n" + m.deckView(dw-2, bh-3))
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, sheet, art, right)
 
 	issues := m.d.Validate()
 	foot := bar(active)
