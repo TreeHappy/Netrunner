@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"boardy/netrunner/internal/carddb"
+	"boardy/netrunner/internal/image"
 	"boardy/netrunner/internal/render"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -37,6 +38,10 @@ type model struct {
 	cards    []carddb.Card
 	list     list.Model
 	preview  string
+	imgW     int
+	imgH     int
+	pending  map[string]bool
+	imageOn  bool
 	query    carddb.Query
 	width    int
 	height   int
@@ -59,14 +64,21 @@ func newModel(db carddb.DB, opts render.Options) model {
 	l.SetFilteringEnabled(true)
 	l.FilterInput.Placeholder = "search title/code…"
 	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("#dddddd")).Background(lipgloss.Color("#333355"))
-	return model{db: db, list: l, opts: opts}
+	return model{db: db, list: l, opts: opts, pending: map[string]bool{}, imageOn: image.Supported(), status: imageStatusDefault()}
 }
 
-func (m *model) refresh() {
+func imageStatusDefault() string {
+	if image.Supported() {
+		return "v toggles images"
+	}
+	return "terminal has no graphics protocol; text previews"
+}
+
+func (m *model) refresh() tea.Cmd {
 	cards, err := carddb.Run(m.db, m.query)
 	if err != nil {
 		m.status = "error: " + err.Error()
-		return
+		return nil
 	}
 	items := make([]list.Item, len(cards))
 	for i, c := range cards {
@@ -74,28 +86,57 @@ func (m *model) refresh() {
 	}
 	m.list.SetItems(items)
 	m.status = fmt.Sprintf("%d cards", len(items))
-	m.updatePreview()
+	return m.updatePreview()
 }
 
-func (m *model) updatePreview() {
+func (m *model) updatePreview() tea.Cmd {
 	sel, ok := m.list.SelectedItem().(item)
 	if !ok {
 		m.preview = ""
-		return
+		return nil
 	}
+	w := m.previewWidth()
+	h := m.height - 6
+	if m.imageOn {
+		payload, iw, ih := image.Card(sel.card.Code, w, h)
+		if payload != "" {
+			m.preview = payload
+			m.imgW, m.imgH = iw, ih
+			return nil
+		}
+		if image.Supported() && image.Path(sel.card.Code) == "" && !m.pending[sel.card.Code] {
+			code := sel.card.Code
+			m.pending[code] = true
+			m.status = "fetching art… " + code
+			return fetchArtCmd(code)
+		}
+	}
+	m.imgW, m.imgH = 0, 0
 	o := m.opts
-	if o.Width > m.previewWidth() {
-		o.Width = m.previewWidth()
+	if o.Width > w {
+		o.Width = w
 	}
 	m.preview = render.Card(sel.card, o)
+	return nil
+}
+
+type artFetchedMsg struct {
+	code string
+	err  error
+}
+
+func fetchArtCmd(code string) tea.Cmd {
+	return func() tea.Msg {
+		return artFetchedMsg{code: code, err: image.Fetch(code)}
+	}
 }
 
 func (m model) previewWidth() int {
-	w := m.width - m.listWidth()
+	w := m.width - m.listWidth() - 4 // list border + image pane borders
 	if w < 30 {
 		w = 30
 	}
-	return w - 2
+	return w
 }
 
 func (m model) listWidth() int {
@@ -117,8 +158,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		h := msg.Height - 4
 		m.list.SetSize(m.listWidth(), h)
-		m.refresh()
-		return m, nil
+		return m, m.updatePreview()
+
+	case artFetchedMsg:
+		delete(m.pending, msg.code)
+		if msg.err != nil {
+			m.status = "no art for " + msg.code
+		}
+		return m, m.updatePreview()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -144,16 +191,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "1":
 			cycle(&m.query.Side, sides)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "2":
 			cycle(&m.query.Type, types)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
 		case "3":
 			cycle(&m.query.Faction, factions)
-			m.refresh()
-			return m, nil
+			return m, m.refresh()
+		case "v":
+			m.imageOn = !m.imageOn
+			if m.imageOn && !image.Supported() {
+				m.status = "terminal has no graphics protocol; using text"
+			} else {
+				m.status = "image preview " + map[bool]string{true: "on", false: "off"}[m.imageOn]
+			}
+			return m, m.updatePreview()
 		}
 	}
 
@@ -161,7 +213,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prev := m.list.SelectedItem()
 	m.list, cmd = m.list.Update(msg)
 	if m.list.SelectedItem() != prev {
-		m.updatePreview()
+		cmd = m.updatePreview()
 	}
 	return m, cmd
 }
@@ -183,27 +235,52 @@ func label(name, val string) string {
 	return name + ":" + val
 }
 
+func paneStyle(w, h int, focused bool) lipgloss.Style {
+	s := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(w).Height(h)
+	if focused {
+		return s.BorderForeground(lipgloss.Color("#88cc88"))
+	}
+	return s.BorderForeground(lipgloss.Color("#444455"))
+}
+
+func paneTitle(s string) string {
+	return lipgloss.NewStyle().Faint(true).Render("○ " + s)
+}
+
 func (m model) View() string {
 	if m.quitting {
 		return ""
 	}
 	filterLine := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf(
-		"[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, q quit",
+		"[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, v images, q quit",
 		label("side", m.query.Side),
 		label("type", m.query.Type),
 		label("faction", m.query.Faction),
 		m.status,
 	))
-	left := lipgloss.NewStyle().Width(m.listWidth()).Render(m.list.View())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, m.preview)
-	return filterLine + "\n" + body + "\n" + filterLine
+	bh := m.height - 3
+	if bh < 6 {
+		bh = 6
+	}
+	lw := m.listWidth()
+	pw := m.previewWidth()
+
+	content := m.preview
+	if m.imgW > 0 && m.imgH > 0 {
+		content = lipgloss.NewStyle().Width(m.imgW).Height(m.imgH).Render(m.preview)
+	}
+
+	left := paneStyle(lw, bh, true).Render(paneTitle("browser") + "\n" + m.list.View())
+	right := paneStyle(pw, bh, false).Render(paneTitle("preview") + "\n" + content)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	return body + "\n" + filterLine
 }
 
 const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd] [code]
 
 Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
-      1 cycle side, 2 cycle type, 3 cycle faction.
+      v toggle image previews, 1 cycle side, 2 cycle type, 3 cycle faction.
 
 If a code is given, render that card and exit.`
 
