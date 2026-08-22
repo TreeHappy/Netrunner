@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +21,8 @@ func TestViewFitsTerminal(t *testing.T) {
 	for _, sz := range sizes {
 		w, h := sz[0], sz[1]
 		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+			t.Setenv("NETRUNNER_IMAGES", filepath.Join(t.TempDir(), "images"))
+			t.Setenv("NETRUNNER_ART", filepath.Join(t.TempDir(), "art"))
 			m := newModel(nil, render.Default())
 			m.width, m.height = w, h
 			lw, _ := m.sheetGeometry()
@@ -31,14 +34,23 @@ func TestViewFitsTerminal(t *testing.T) {
 			if err := m.list.SetItems(items); err != nil {
 				t.Fatal(err)
 			}
+			// Mark cards as already pending so updatePreview issues no
+			// fetch/crop commands (tests must stay hermetic).
+			for _, it := range sampleCards() {
+				m.pending[it.Code] = true
+			}
 			if cmd := m.updatePreview(); cmd != nil {
 				t.Fatal("updatePreview should not start fetches in tests")
 			}
 			view := m.View()
-			for i, line := range strings.Split(view, "\n") {
+			lines := strings.Split(view, "\n")
+			for i, line := range lines {
 				if lw := ansi.StringWidth(line); lw > w {
 					t.Errorf("line %d is %d columns (terminal %d): %q", i, lw, w, line)
 				}
+			}
+			if len(lines) > h {
+				t.Errorf("view has %d rows (terminal %d)", len(lines), h)
 			}
 		})
 	}
@@ -72,5 +84,56 @@ func TestCardSheetNeverExceedsWidth(t *testing.T) {
 				t.Errorf("width %d: art band missing", width)
 			}
 		}
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode string
+		wantW    int
+		wantProt string
+		wantErr  bool
+	}{
+		{"code", []string{"01001"}, "01001", 0, "", false},
+		{"images space", []string{"--images", "kitty", "09004"}, "09004", 0, "kitty", false},
+		{"images eq", []string{"--images=kitty", "09004"}, "09004", 0, "kitty", false},
+		{"images bare", []string{"--images"}, "", 0, "auto", false},
+		{"images ueberzug", []string{"--images=ueberzug", "09004"}, "09004", 0, "ueberzug", false},
+		{"images ueberzugpp", []string{"--images", "ueberzugpp", "09004"}, "09004", 0, "ueberzugpp", false},
+		{"width eq", []string{"--width=80"}, "", 80, "", false},
+		{"width space", []string{"--width", "100", "01041"}, "01041", 100, "", false},
+		{"plain", []string{"--plain", "--no-icons"}, "", 0, "", false},
+		{"bad protocol", []string{"--images=lp0"}, "", 0, "", true},
+		{"unknown flag", []string{"--wat"}, "", 0, "", true},
+		{"dash code", []string{"-x"}, "", 0, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := parseArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseArgs(%q) = nil error, want error", tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs(%q): %v", tt.args, err)
+			}
+			if p.code != tt.wantCode || p.opts.Width != tt.wantW || p.protocol != tt.wantProt {
+				t.Errorf("parseArgs(%q) = %+v, want code=%q w=%d proto=%q",
+					tt.args, p, tt.wantCode, tt.wantW, tt.wantProt)
+			}
+		})
+	}
+}
+
+func TestRenderCardWithArtPlainFallback(t *testing.T) {
+	opts := render.Default()
+	opts.Plain = true
+	got := renderCardWithArt(sampleCards()[0], opts, 80, 30)
+	if want := render.Card(sampleCards()[0], opts); got != want {
+		t.Errorf("plain renderCardWithArt differs from render.Card")
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,25 +68,25 @@ func ArtPath(code string) string {
 	return ""
 }
 
-// EnsureArt crops the card's cached scan down to the artwork band using
-// ImageMagick, writing into ArtDir. Originals are never modified. Returns
-// the artwork path ("" when the source scan or magick is missing).
-func EnsureArt(code string) string {
+// EnsureArtErr crops the card's cached scan down to the artwork band using
+// ImageMagick, writing into ArtDir. Unlike EnsureArt it reports why cropping
+// was not possible. Returns the artwork path.
+func EnsureArtErr(code string) (string, error) {
 	if p := ArtPath(code); p != "" {
-		return p
+		return p, nil
 	}
 	src := Path(code)
 	if src == "" {
-		return ""
+		return "", fmt.Errorf("no cached scan for %s", code)
 	}
 	magick, err := exec.LookPath("magick")
 	if err != nil {
 		if magick, err = exec.LookPath("convert"); err != nil {
-			return ""
+			return "", fmt.Errorf("imagemagick not installed: %w", err)
 		}
 	}
 	if err := os.MkdirAll(ArtDir(), 0o755); err != nil {
-		return ""
+		return "", fmt.Errorf("mkdir %s: %w", ArtDir(), err)
 	}
 	dst := filepath.Join(ArtDir(), code+".jpg")
 	box := artBox
@@ -93,18 +94,99 @@ func EnsureArt(code string) string {
 	cmd := exec.Command(magick, src, "-crop", geo, "+repage", "-quality", "90", dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.Remove(dst)
-		_ = out
-		return ""
+		return "", fmt.Errorf("crop %s: %w: %s", code, err, strings.TrimSpace(string(out)))
 	}
-	if ArtPath(code) == "" {
-		return ""
+	if p := ArtPath(code); p != "" {
+		return p, nil
 	}
-	return dst
+	return "", fmt.Errorf("crop %s: magick produced no output at %s", code, dst)
+}
+
+// EnsureArt crops the card's cached scan down to the artwork band using
+// ImageMagick, writing into ArtDir. Originals are never modified. Returns
+// the artwork path ("" when the source scan or magick is missing).
+func EnsureArt(code string) string {
+	p, _ := EnsureArtErr(code)
+	return p
+}
+
+// forceProtocol overrides auto-detection when non-zero (set via
+// NETRUNNER_IMAGE_PROTOCOL or --images=PROTO).
+var forceProtocol termimg.Protocol
+
+// forceUeberzug selects the ueberzugpp overlay backend (--images=ueberzug).
+var forceUeberzug bool
+
+var (
+	detectOnce    sync.Once
+	detectedProto termimg.Protocol
+)
+
+func detectInline() termimg.Protocol {
+	detectOnce.Do(func() { detectedProto = termimg.DetectProtocol() })
+	return detectedProto
+}
+
+// SetProtocolOverride forces a graphics protocol by name
+// ("kitty", "sixel", "iterm2", "auto", "halfblocks", "ueberzug").
+func SetProtocolOverride(name string) error {
+	switch strings.ToLower(name) {
+	case "", "auto":
+		forceProtocol = termimg.Auto
+		forceUeberzug = false
+	case "kitty":
+		forceProtocol = termimg.Kitty
+		forceUeberzug = false
+	case "sixel":
+		forceProtocol = termimg.Sixel
+		forceUeberzug = false
+	case "iterm2", "iterm":
+		forceProtocol = termimg.ITerm2
+		forceUeberzug = false
+	case "halfblocks", "none", "off":
+		forceProtocol = termimg.Halfblocks
+		forceUeberzug = false
+	case "ueberzug", "ueberzugpp":
+		forceProtocol = 0
+		forceUeberzug = true
+	default:
+		return fmt.Errorf("unknown protocol %q (want kitty, sixel, iterm2, ueberzug, auto)", name)
+	}
+	return nil
+}
+
+// UseUeberzug reports whether rendering currently goes through the
+// ueberzugpp overlay backend: either forced via --images=ueberzug or, in
+// auto mode, as a fallback when no inline protocol is available.
+func UseUeberzug() bool {
+	if forceProtocol == termimg.Halfblocks {
+		return false
+	}
+	if forceUeberzug {
+		return ueberzugPossible()
+	}
+	if forceProtocol != 0 {
+		return false
+	}
+	return detectInline() == termimg.Halfblocks && ueberzugPossible()
 }
 
 // Supported reports whether the terminal can show real images.
 func Supported() bool {
-	return termimg.DetectProtocol() != termimg.Halfblocks
+	if forceProtocol != 0 {
+		return forceProtocol != termimg.Halfblocks
+	}
+	if forceUeberzug {
+		return ueberzugPossible()
+	}
+	return detectInline() != termimg.Halfblocks || UseUeberzug()
+}
+
+func forcedOrAuto() termimg.Protocol {
+	if forceProtocol != 0 {
+		return forceProtocol
+	}
+	return termimg.Auto
 }
 
 type rendered struct {
@@ -117,19 +199,17 @@ var (
 	fetching    sync.Map // code -> bool
 )
 
-// Card renders the card's artwork (cropped art when available, else the
-// full scan) scaled to fit within width×height cells while preserving
-// aspect ratio. It returns the raw protocol payload (emit unstyled) and
-// the number of cells it actually occupies. Returns empty payload when
-// unsupported or not cached; renders are cached per (card, size).
+// Card renders the card's cropped artwork scaled to fit within width×height
+// cells while preserving aspect ratio. It never falls back to the full
+// card scan: callers should trigger EnsureArt when the crop is missing.
+// It returns the raw protocol payload (emit unstyled) and the number of
+// cells it actually occupies. Returns empty payload when unsupported or
+// not cached; renders are cached per (card, size).
 func Card(code string, width, height int) (string, int, int) {
 	if !Supported() || width < 4 || height < 4 {
 		return "", 0, 0
 	}
 	p := ArtPath(code)
-	if p == "" {
-		p = Path(code)
-	}
 	if p == "" {
 		return "", 0, 0
 	}
@@ -138,11 +218,18 @@ func Card(code string, width, height int) (string, int, int) {
 		r := v.(rendered)
 		return r.payload, r.w, r.h
 	}
+	if UseUeberzug() {
+		payload, w, h := cardUeberzug(code, p, width, height)
+		if payload != "" {
+			renderCache.Store(key, rendered{payload, w, h})
+		}
+		return payload, w, h
+	}
 	widget, err := termimg.NewImageWidgetFromFile(p)
 	if err != nil {
 		return "", 0, 0
 	}
-	widget.SetSizeWithCorrection(width, height).SetProtocol(termimg.Auto)
+	widget.SetSizeWithCorrection(width, height).SetProtocol(forcedOrAuto())
 	s, err := widget.Render()
 	if err != nil {
 		return "", 0, 0

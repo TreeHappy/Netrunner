@@ -6,9 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BIN="$ROOT/.cache/nrbrowse"
-if [ ! -x "$BIN" ] || [ "$ROOT/cmd/nrbrowse" -nt "$BIN" ] || \
-   [ "$ROOT/internal/image/image.go" -nt "$BIN" ] || \
-   [ "$ROOT/internal/render/render.go" -nt "$BIN" ]; then
+if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/cmd/nrbrowse" "$ROOT/internal/image" \
+    "$ROOT/internal/render" -name '*.go' -newer "$BIN" 2>/dev/null)" ]; then
   mkdir -p "$(dirname "$BIN")"
   go build -o "$BIN" "$ROOT/cmd/nrbrowse"
 fi

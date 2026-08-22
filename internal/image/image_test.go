@@ -58,6 +58,28 @@ func TestCardPrefersArt(t *testing.T) {
 	}
 }
 
+// TestCardNoFullScanFallback verifies Card never renders the full scan
+// when only the crop is missing.
+func TestCardNoFullScanFallback(t *testing.T) {
+	src := repoScanDir()
+	if _, err := os.Stat(filepath.Join(src, "01001.jpg")); err != nil {
+		t.Skip("no cached scan available")
+	}
+	t.Setenv("NETRUNNER_IMAGES", src)
+	t.Setenv("NETRUNNER_ART", t.TempDir()) // no cropped art
+
+	if orig := forceProtocol; true {
+		defer func() { forceProtocol = orig }()
+	}
+	if err := SetProtocolOverride("kitty"); err != nil {
+		t.Fatal(err)
+	}
+	payload, w, h := Card("01001", 40, 30)
+	if payload != "" || w != 0 || h != 0 {
+		t.Fatal("Card fell back to the full scan; want empty payload without cropped art")
+	}
+}
+
 func execLookPath() (string, error) {
 	return exec.LookPath("magick")
 }

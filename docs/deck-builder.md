@@ -49,7 +49,7 @@ the edges instead:
 Card display degrades gracefully through three tiers, selected at runtime:
 
 1. **Image** — cached artwork via `internal/image` (go-termimg; kitty/sixel/
-   iTerm2 auto-detect), toggled with `v`
+   iTerm2 auto-detect, with ueberzugpp overlay fallback), toggled with `v`
 2. **Text sheet** — `render.Card` box (emoji icons by default)
 3. **ASCII/plain** — `--plain`, `--no-icons`
 

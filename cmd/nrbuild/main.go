@@ -86,6 +86,7 @@ type model struct {
 	height int
 	opts   render.Options
 	loaded bool
+	artRow int // art-band row within the preview (-1 when absent)
 
 	quitting bool
 }
@@ -153,6 +154,7 @@ func (m *model) updatePreview() tea.Cmd {
 
 	o := m.opts
 	o.Width = s - 2 // Card() subtracts border + padding itself
+	m.artRow = -1
 	if m.imageMode {
 		o.ArtBand = &render.ArtBand{W: m.bandW, H: m.bandH}
 		if payload == "" && image.Supported() {
@@ -167,8 +169,16 @@ func (m *model) updatePreview() tea.Cmd {
 		}
 	}
 	m.preview = render.Card(sel.card, o)
+	for i, ln := range strings.Split(m.preview, "\n") {
+		if strings.Contains(ln, render.ArtSentinel) {
+			m.artRow = i
+			break
+		}
+	}
 	if payload != "" && m.imageMode {
 		m.preview = render.SpliceArt(m.preview, payload, o.Width)
+	} else if image.UseUeberzug() {
+		image.HideArt()
 	}
 	return cmd
 }
@@ -234,9 +244,17 @@ func (m *model) removeFromDeck(all bool) {
 
 func (m model) Init() tea.Cmd { return nil }
 
+func (m *model) quit() (tea.Model, tea.Cmd) {
+	m.quitting = true
+	return m, tea.Sequence(func() tea.Msg { image.HideArt(); return nil }, tea.Quit)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		if image.UseUeberzug() {
+			image.HideArt()
+		}
 		m.width, m.height = msg.Width, msg.Height
 		lw, _, _ := paneInteriors(m.width)
 		m.list.SetSize(lw, bodyHeight(m.height)-2)
@@ -268,12 +286,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c", "q":
-			m.quitting = true
-			return m, tea.Quit
+			return m.quit()
 		case "esc":
 			if m.list.FilterState() != list.FilterApplied {
-				m.quitting = true
-				return m, tea.Quit
+				return m.quit()
 			}
 		case "enter":
 			m.addSelected()
@@ -571,6 +587,16 @@ func (m model) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, sheet, right)
 
+	// ueberzugpp overlay: report the art band's absolute cell position
+	// (sheet pane interior starts at column lw+3; sheet border+padding +2).
+	if image.UseUeberzug() {
+		if m.imageMode && m.artRow >= 0 {
+			image.ApplyUeberzug(lw+5, 2+m.artRow)
+		} else {
+			image.HideArt()
+		}
+	}
+
 	issues := m.d.Validate()
 	foot := bar(active)
 	if len(issues) > 0 {
@@ -611,6 +637,7 @@ If deckfile exists it is loaded; decks are saved there with 'w'.
 Piping a decklist (or bare card codes) into stdin seeds the deck.`
 
 func main() {
+	defer image.Shutdown()
 	opts := render.Default()
 	file := ""
 	args := os.Args[1:]

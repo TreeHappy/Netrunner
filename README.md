@@ -23,7 +23,7 @@ Engelstein & Shalev's *Building Blocks of Tabletop Game Design* and Schell's
   deck building, and rendering.
 - `internal/carddb/` — card database loading + SQL query builder (DuckDB + netrunner-cards-json schema).
 - `internal/render/`, `internal/glyphs/` — card sheet rendering (emoji / nerd-font / ASCII).
-- `internal/image/` — terminal card artwork via kitty/sixel/iTerm2 graphics protocols.
+- `internal/image/` — terminal card artwork via kitty/sixel/iTerm2 graphics protocols plus a ueberzugpp overlay fallback.
 - `internal/deck/` — decklist model and construction-rule validation.
 - `scripts/` — helper scripts (see below).
 - `data/netrunner-cards-json` — git submodule pinning
@@ -71,7 +71,7 @@ Requires [mise](https://mise.jdx.dev)-installed ImageMagick (`mise use -g imagem
 for cropping; the TUIs crop artwork automatically after download.
 
 With images cached, open the browser or deck builder in a graphics-capable
-terminal (kitty, WezTerm, ghostty, foot, …) and press `v` to toggle image
+terminal (kitty, WezTerm, ghostty, foot, …); on terminals without an inline protocol, ueberzugpp (if installed) draws artwork as an overlay via X11/Wayland and press `v` to toggle image
 preview of the selected card. Terminals without a graphics protocol fall back
 to text rendering automatically.
 
@@ -104,7 +104,7 @@ Keybindings (nvim-style):
 | `i` | browse identities for the current side |
 | `x` / `X` | remove one / all copies of selected deck entry |
 | `+` / `-` | adjust copies of selected deck entry |
-| `v` | toggle terminal image preview (kitty/sixel) |
+| `v` | toggle terminal image preview (kitty/sixel/ueberzugpp) |
 | `w` / `e` | save / reload the decklist file |
 | `q` | quit |
 

@@ -1,2 +1,6 @@
 [tools]
 go = "1.26"
+
+[tasks.install-ueberzugpp]
+description = "Build ueberzugpp from source (overlay image backend for terminal artwork)"
+run = "scripts/install-ueberzugpp.sh"

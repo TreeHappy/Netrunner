@@ -53,6 +53,7 @@ type model struct {
 	status   string
 	quitting bool
 	loaded   bool
+	artRow   int // art-band row within the preview (-1 when absent)
 }
 
 var (
@@ -99,6 +100,16 @@ func (m *model) refresh() tea.Cmd {
 	return m.updatePreview()
 }
 
+// paneInterior returns the card pane's interior rows: total height minus
+// the outer chrome (filter line, pane border top/bottom, pane title).
+func (m model) paneInterior() int {
+	h := m.height - 3 - 3
+	if h < 6 {
+		h = 6
+	}
+	return h
+}
+
 func (m *model) updatePreview() tea.Cmd {
 	sel, ok := m.list.SelectedItem().(item)
 	if !ok {
@@ -107,10 +118,18 @@ func (m *model) updatePreview() tea.Cmd {
 	}
 	sw := m.sheetWidth()
 	bandW := sw - 4 // inside the sheet's border + padding
+	interior := m.paneInterior()
 	var cmd tea.Cmd
 
+	// Reserve room for header/stats/rules/body around the art band.
+	reserved := 8
+	maxBandH := interior - reserved
+	if maxBandH < 4 {
+		maxBandH = 4
+	}
+
 	// Try to render artwork; its cell size defines the reserved band.
-	payload, iw, ih := image.Card(sel.card.Code, bandW, m.height-6)
+	payload, iw, ih := image.Card(sel.card.Code, bandW, maxBandH)
 	if payload != "" && m.imageOn && ih > 0 {
 		m.bandW, m.bandH = iw, ih
 	} else {
@@ -119,28 +138,32 @@ func (m *model) updatePreview() tea.Cmd {
 		if h < 4 {
 			h = 4
 		}
-		if h > 14 {
-			h = 14
+		if h > maxBandH {
+			h = maxBandH
 		}
 		m.bandW, m.bandH = bandW, h
-		if m.imageOn && image.Supported() && image.Path(sel.card.Code) == "" &&
-			!m.pending[sel.card.Code] && !m.failed[sel.card.Code] {
-			code := sel.card.Code
-			m.pending[code] = true
-			cmd = tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+		code := sel.card.Code
+		if m.imageOn && image.Supported() && !m.pending[code] && !m.failed[code] {
+			switch {
+			case image.Path(code) == "":
+				m.pending[code] = true
+				cmd = tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+			case image.ArtPath(code) == "":
+				// Scan cached but artwork not cropped yet; crop it instead
+				// of silently rendering the full scan.
+				m.pending[code] = true
+				cmd = tea.Batch(ensureArtCmd(code), m.spinner.Tick)
+			}
 		}
 	}
 
 	o := m.opts
 	o.Width = sw // Card() output spans exactly this many columns
+	m.artRow = -1
 	if m.imageOn {
 		o.ArtBand = &render.ArtBand{W: m.bandW, H: m.bandH}
 		o.ArtNote = ""
-		if payload != "" {
-			m.preview = render.SpliceArt(render.Card(sel.card, o), payload, o.Width)
-			return cmd
-		}
-		if image.Supported() {
+		if payload == "" && image.Supported() {
 			switch {
 			case m.pending[sel.card.Code] || image.Fetching(sel.card.Code):
 				o.ArtNote = "fetching art…"
@@ -150,8 +173,47 @@ func (m *model) updatePreview() tea.Cmd {
 				o.ArtNote = "no artwork cached"
 			}
 		}
+		// Shrink the band until the sheet fits the pane interior so the
+		// view never exceeds the terminal (inline images break on scroll).
+		for {
+			sheet := render.Card(sel.card, o)
+			if lipgloss.Height(sheet) <= interior || m.bandH <= 4 {
+				if payload != "" && m.bandH >= ih {
+					for i, ln := range strings.Split(sheet, "\n") {
+						if strings.Contains(ln, render.ArtSentinel) {
+							m.artRow = i
+							break
+						}
+					}
+					m.preview = render.SpliceArt(sheet, payload, o.Width)
+				} else {
+					payload = ""
+					for i, ln := range strings.Split(sheet, "\n") {
+						if strings.Contains(ln, render.ArtSentinel) {
+							m.artRow = i
+							break
+						}
+					}
+					m.preview = sheet
+					if image.UseUeberzug() {
+						image.HideArt()
+					}
+				}
+				break
+			}
+			m.bandH--
+			o.ArtBand.H = m.bandH
+		}
+		// Final guard: never let the preview overflow the pane interior.
+		if rows := strings.Split(m.preview, "\n"); len(rows) > interior {
+			m.preview = strings.Join(rows[:interior], "\n")
+		}
+		return cmd
 	}
 	m.preview = render.Card(sel.card, o)
+	if image.UseUeberzug() {
+		image.HideArt()
+	}
 	return cmd
 }
 
@@ -163,6 +225,13 @@ type artFetchedMsg struct {
 func fetchArtCmd(code string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := image.FetchWithArt(code)
+		return artFetchedMsg{code: code, err: err}
+	}
+}
+
+func ensureArtCmd(code string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := image.EnsureArtErr(code)
 		return artFetchedMsg{code: code, err: err}
 	}
 }
@@ -200,9 +269,22 @@ func (m model) listWidth() int {
 
 func (m model) Init() tea.Cmd { return nil }
 
+func hideArtCmd() tea.Msg {
+	image.HideArt()
+	return nil
+}
+
+func (m *model) quit() (tea.Model, tea.Cmd) {
+	m.quitting = true
+	return m, tea.Sequence(hideArtCmd, tea.Quit)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		if image.UseUeberzug() {
+			image.HideArt()
+		}
 		m.width, m.height = msg.Width, msg.Height
 		h := msg.Height - 4
 		m.list.SetSize(m.listWidth(), h)
@@ -233,21 +315,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
+			return m.quit()
 		case "q":
 			if m.list.FilterState() != list.Filtering {
-				m.quitting = true
-				return m, tea.Quit
+				return m.quit()
 			}
 		case "esc":
 			if m.list.FilterState() == list.Filtering || m.list.FilterState() == list.FilterApplied {
 				break
 			}
-			m.quitting = true
-			return m, tea.Quit
+			return m.quit()
 		case "enter":
 			if sel, ok := m.list.SelectedItem().(item); ok {
+				image.HideArt()
 				fmt.Println(render.Card(sel.card, m.opts))
 				m.quitting = true
 				return m, tea.Quit
@@ -329,6 +409,24 @@ func (m model) View() string {
 	left := paneStyle(lw, bh, true).Render(paneTitle("browser") + "\n" + m.list.View())
 	mid := paneStyle(sw, bh, false).Render(paneTitle("card") + "\n" + m.preview)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, mid)
+	// Hard geometry guard: pane content can rewrap inside lipgloss and
+	// grow past its configured height; clip so the view always fits the
+	// terminal exactly (inline images break when the frame scrolls).
+	if rows := strings.Split(body, "\n"); len(rows) > m.height-1 {
+		bottom := rows[len(rows)-1] // preserve the pane bottom border
+		rows = append(rows[:m.height-2], bottom)
+		body = strings.Join(rows, "\n")
+	}
+	// ueberzugpp overlays are drawn outside the terminal buffer; report the
+	// art band's absolute cell position each frame (mid interior starts at
+	// column lw+3, sheet border+padding add 2 more; rows 0-1 are border+title).
+	if image.UseUeberzug() {
+		if m.imageOn && m.artRow >= 0 {
+			image.ApplyUeberzug(lw+5, 2+m.artRow)
+		} else {
+			image.HideArt()
+		}
+	}
 	return body + "\n" + filterLine
 }
 
@@ -341,54 +439,131 @@ func trunc(s string, w int) string {
 	return string(r[:max(0, w-1)]) + "…"
 }
 
-const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd] [code]
+// parsedArgs holds the result of command-line parsing.
+type parsedArgs struct {
+	opts       render.Options
+	code       string // card code positional arg
+	protocol   string // --images override ("" = none)
+	renderTest string // --render-test WxH frame request
+}
+
+// parseArgs parses flags in both `--flag value` and `--flag=value` forms.
+// Unknown dash-prefixed args are rejected; the single positional arg is the
+// card code.
+func parseArgs(args []string) (parsedArgs, error) {
+	var p parsedArgs
+	next := func(i *int) (string, bool) {
+		if *i+1 >= len(args) {
+			return "", false
+		}
+		*i++
+		return args[*i], true
+	}
+	for i := 0; i < len(args); i++ {
+		name, val, hasVal := strings.Cut(args[i], "=")
+		switch name {
+		case "--plain":
+			p.opts.Plain = true
+		case "--no-icons":
+			p.opts.Icons = false
+		case "--nerd":
+			p.opts.NerdIcons = true
+		case "--width":
+			if !hasVal {
+				var ok bool
+				if val, ok = next(&i); !ok {
+					return p, errUsage("missing value for --width")
+				}
+			}
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return p, errUsage("invalid --width %q", val)
+			}
+			p.opts.Width = n
+		case "--images":
+			if !hasVal {
+				var ok bool
+				if val, ok = next(&i); !ok || strings.HasPrefix(val, "-") {
+					val = os.Getenv("NETRUNNER_IMAGE_PROTOCOL")
+				}
+				if val == "" {
+					val = "auto"
+				}
+			}
+			if !isProtocolName(val) {
+				return p, fmt.Errorf("unknown protocol %q (want kitty, sixel, iterm2, ueberzug, auto)", val)
+			}
+			p.protocol = val
+		case "--render-test":
+			if !hasVal {
+				var ok bool
+				if val, ok = next(&i); !ok {
+					return p, errUsage("missing WxH for --render-test")
+				}
+			}
+			p.renderTest = val
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return p, errUsage("unknown flag %s", args[i])
+			}
+			p.code = args[i]
+		}
+	}
+	return p, nil
+}
+
+func errUsage(format string, a ...any) error {
+	return fmt.Errorf(format+":\n%s", append(a, usage)...)
+}
+
+// renderCardWithArt renders a card sheet with inline artwork when the
+// terminal supports a graphics protocol, downloading and cropping the
+// image on demand. Falls back to plain rendering on any failure.
+func renderCardWithArt(c carddb.Card, opts render.Options, width, height int) string {
+	if opts.Plain || !image.Supported() || image.UseUeberzug() {
+		return render.Card(c, opts)
+	}
+	payload, iw, ih := image.Card(c.Code, width-4, height)
+	if payload == "" && image.Path(c.Code) == "" && !image.Fetching(c.Code) {
+		if _, err := image.FetchWithArt(c.Code); err != nil {
+			return render.Card(c, opts)
+		}
+		payload, iw, ih = image.Card(c.Code, width-4, height)
+	}
+	if payload == "" || ih == 0 {
+		return render.Card(c, opts)
+	}
+	o := opts
+	o.Width = width // Card() output spans exactly this many columns
+	o.ArtBand = &render.ArtBand{W: iw, H: ih}
+	o.ArtNote = ""
+	return render.SpliceArt(render.Card(c, o), payload, o.Width)
+}
+
+const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd]
+                [--images [kitty|sixel|iterm2|ueberzug|auto]] [code]
 
 Interactive card browser. Select a card to render it.
 Keys: type to search, ↑/↓ browse, enter print & quit, q quit,
       v toggle image previews, 1 cycle side, 2 cycle type, 3 cycle faction.
 
+The --images flag forces a graphics protocol (also via
+NETRUNNER_IMAGE_PROTOCOL), bypassing detection — useful inside tmux/ssh.
+ueberzugpp uses an overlay daemon; in auto mode it is only tried when no
+inline protocol is detected.
 If a code is given, render that card and exit.`
 
 func main() {
-	opts := render.Default()
-	code := ""
-	args := os.Args[1:]
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--plain":
-			opts.Plain = true
-		case "--no-icons":
-			opts.Icons = false
-		case "--nerd":
-			opts.NerdIcons = true
-		case "--width":
-			i++
-			if i >= len(args) {
-				fatal(usage)
-			}
-			n, err := strconv.Atoi(args[i])
-			if err != nil {
-				fatal(usage)
-			}
-			opts.Width = n
-		case "--render-test":
-			i++
-			if i >= len(args) {
-				fatal(usage)
-			}
-			parts := strings.SplitN(args[i], "x", 2)
-			if len(parts) != 2 {
-				fatal(usage)
-			}
-			w, err1 := strconv.Atoi(parts[0])
-			h, err2 := strconv.Atoi(parts[1])
-			if err1 != nil || err2 != nil || w < 20 || h < 6 {
-				fatal(usage)
-			}
-			fmt.Print(renderTestFrame(w, h))
-			return
-		default:
-			code = args[i]
+	defer image.Shutdown()
+	parsed, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fatal(err)
+	}
+	opts := parsed.opts
+
+	if parsed.protocol != "" {
+		if err := image.SetProtocolOverride(parsed.protocol); err != nil {
+			fatal(err)
 		}
 	}
 
@@ -398,10 +573,29 @@ func main() {
 	}
 	defer db.Close()
 
-	if code != "" {
-		c, err := carddb.ByCode(db, code)
+	if parsed.renderTest != "" {
+		parts := strings.SplitN(parsed.renderTest, "x", 2)
+		w, err1 := strconv.Atoi(parts[0])
+		h, err2 := strconv.Atoi(parts[1])
+		if len(parts) != 2 || err1 != nil || err2 != nil || w < 20 || h < 6 {
+			fatal(fmt.Sprintf("invalid --render-test frame %q", parsed.renderTest))
+		}
+		fmt.Print(renderTestFrame(w, h))
+		return
+	}
+
+	if parsed.code != "" {
+		c, err := carddb.ByCode(db, parsed.code)
 		if err != nil {
 			fatal(err)
+		}
+		if isTTY() {
+			w := opts.Width
+			if w == 0 {
+				w = 80
+			}
+			fmt.Println(renderCardWithArt(c, opts, w, 30))
+			return
 		}
 		fmt.Println(render.Card(c, opts))
 		return
@@ -422,6 +616,14 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		fatal(err)
 	}
+}
+
+func isProtocolName(s string) bool {
+	switch strings.ToLower(s) {
+	case "kitty", "sixel", "iterm2", "iterm", "auto", "halfblocks", "none", "off", "ueberzug", "ueberzugpp":
+		return true
+	}
+	return false
 }
 
 func isTTY() bool {
