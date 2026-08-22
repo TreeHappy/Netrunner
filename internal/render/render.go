@@ -35,6 +35,39 @@ type Options struct {
 	Width     int  // 0 = auto-detect terminal width (fallback 60)
 	Icons     bool // show emoji type/faction icons
 	NerdIcons bool // show nerd-font glyphs instead of emojis (needs a nerd font)
+
+	// ArtBand reserves a centered artwork slot inside the card sheet,
+	// between the stat pills and the rules body. ArtNote labels the empty
+	// placeholder frame (e.g. "fetching art…").
+	ArtBand *ArtBand
+	ArtNote string
+}
+
+// ArtBand describes the reserved artwork slot in card-sheet cells.
+type ArtBand struct {
+	W, H int
+}
+
+// ArtSentinel marks the first row of the reserved artwork band. TUIs splice
+// a graphics-protocol payload over this line (see SpliceArt).
+const ArtSentinel = "\x00ART\x00"
+
+// SpliceArt replaces the artwork band's sentinel row in a rendered sheet
+// with the raw graphics payload, padding the row to w printable cells so
+// layout is unaffected (payloads carry no printable width).
+func SpliceArt(sheet, payload string, w int) string {
+	lines := strings.Split(sheet, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, ArtSentinel) {
+			pad := w - lipgloss.Width(payload)
+			if pad < 0 {
+				pad = 0
+			}
+			lines[i] = payload + strings.Repeat(" ", pad)
+			return strings.Join(lines, "\n")
+		}
+	}
+	return sheet
 }
 
 // Default returns options suitable for the current terminal.
@@ -374,26 +407,40 @@ func Body(c carddb.Card, opts Options, innerWidth int) string {
 	return b.String()
 }
 
-// Card renders a full bordered card sheet.
+// Card renders a full bordered card sheet. When opts.Width is set the
+// output never exceeds that many columns: over-long lines are truncated,
+// not allowed to expand the box.
 func Card(c carddb.Card, opts Options) string {
 	innerWidth := effectiveWidth(opts) - 4 // account for border + padding
-	if innerWidth < 20 {
-		innerWidth = 20
+	if innerWidth < 10 {
+		innerWidth = 10
 	}
 
 	sections := []string{Header(c, opts)}
 	if stats := Stats(c, opts); stats != "" {
 		sections = append(sections, stats)
 	}
+	if opts.ArtBand != nil {
+		sections = append(sections, artBand(*opts.ArtBand, innerWidth, opts.ArtNote))
+	}
 	sections = append(sections, Body(c, opts, innerWidth))
 	content := strings.Join(sections, "\n\x00RULE\x00\n") + "\n"
 
-	for _, line := range strings.Split(content, "\n") {
-		if w := lipgloss.Width(line); w > innerWidth {
-			innerWidth = w
-		}
-	}
 	content = strings.ReplaceAll(content, "\x00RULE\x00", ruleLine(opts, innerWidth))
+
+	// Enforce the width budget strictly; sentinel rows already have exact
+	// printable width and must not pass through MaxWidth (control runes).
+	var enforced strings.Builder
+	style := lipgloss.NewStyle().MaxWidth(innerWidth)
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, ArtSentinel) {
+			enforced.WriteString(line)
+		} else {
+			enforced.WriteString(style.Render(line))
+		}
+		enforced.WriteString("\n")
+	}
+	content = strings.TrimSuffix(enforced.String(), "\n")
 
 	if opts.Plain || lipgloss.ColorProfile() == 0 {
 		return content
@@ -406,6 +453,47 @@ func Card(c carddb.Card, opts Options) string {
 		Render(content)
 
 	return box + "\n"
+}
+
+// artBand renders the reserved artwork slot: a sentinel row for payload
+// splicing plus a faint dashed frame with an optional note.
+func artBand(band ArtBand, innerWidth int, note string) string {
+	w := band.W
+	if w > innerWidth {
+		w = innerWidth
+	}
+	if w < 4 {
+		w = 4
+	}
+	h := band.H
+	if h < 3 {
+		h = 3
+	}
+	faint := lipgloss.NewStyle().Faint(true)
+
+	var b strings.Builder
+	b.WriteString(ArtSentinel + strings.Repeat(" ", max(0, w-1)))
+	b.WriteString("\n")
+	noteRow := h / 2
+	for i := 1; i < h-1; i++ {
+		mid := ""
+		if i == noteRow && note != "" {
+			r := []rune(note)
+			if len(r) > w-4 {
+				r = r[:w-4]
+			}
+			mid = string(r)
+			padL := (w - 2 - len([]rune(mid))) / 2
+			padR := w - 2 - padL - len([]rune(mid))
+			mid = strings.Repeat(" ", padL) + mid + strings.Repeat(" ", max(0, padR))
+		} else {
+			mid = strings.Repeat(" ", w-2)
+		}
+		b.WriteString(faint.Render("┆" + mid + "┆"))
+		b.WriteString("\n")
+	}
+	b.WriteString(faint.Render(strings.Repeat("┈", w)))
+	return b.String()
 }
 
 func ruleLine(opts Options, width int) string {

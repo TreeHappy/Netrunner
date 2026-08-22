@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
@@ -40,6 +41,8 @@ type model struct {
 	list     list.Model
 	spinner  spinner.Model
 	preview  string
+	bandW    int
+	bandH    int
 	pending  map[string]bool
 	failed   map[string]bool
 	imageOn  bool
@@ -102,23 +105,54 @@ func (m *model) updatePreview() tea.Cmd {
 		m.preview = ""
 		return nil
 	}
+	sw := m.sheetWidth()
+	bandW := sw - 4 // inside the sheet's border + padding
+	var cmd tea.Cmd
+
+	// Try to render artwork; its cell size defines the reserved band.
+	payload, iw, ih := image.Card(sel.card.Code, bandW, m.height-6)
+	if payload != "" && m.imageOn && ih > 0 {
+		m.bandW, m.bandH = iw, ih
+	} else {
+		// Placeholder band while fetching / when missing.
+		h := sw * 2 / 5
+		if h < 4 {
+			h = 4
+		}
+		if h > 14 {
+			h = 14
+		}
+		m.bandW, m.bandH = bandW, h
+		if m.imageOn && image.Supported() && image.Path(sel.card.Code) == "" &&
+			!m.pending[sel.card.Code] && !m.failed[sel.card.Code] {
+			code := sel.card.Code
+			m.pending[code] = true
+			cmd = tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+		}
+	}
+
 	o := m.opts
-	if o.Width > m.sheetWidth() {
-		o.Width = m.sheetWidth()
+	o.Width = sw // Card() output spans exactly this many columns
+	if m.imageOn {
+		o.ArtBand = &render.ArtBand{W: m.bandW, H: m.bandH}
+		o.ArtNote = ""
+		if payload != "" {
+			m.preview = render.SpliceArt(render.Card(sel.card, o), payload, o.Width)
+			return cmd
+		}
+		if image.Supported() {
+			switch {
+			case m.pending[sel.card.Code] || image.Fetching(sel.card.Code):
+				o.ArtNote = "fetching art…"
+			case m.failed[sel.card.Code]:
+				o.ArtNote = "✗ no art"
+			default:
+				o.ArtNote = "no artwork cached"
+			}
+		}
 	}
 	m.preview = render.Card(sel.card, o)
-	if !m.imageOn || !image.Supported() {
-		return nil
-	}
-	code := sel.card.Code
-	if payload, _, _ := image.Card(code, m.artWidth(), m.height-6); payload != "" {
-		return nil
-	}
-	if image.Path(code) == "" && !m.pending[code] && !m.failed[code] {
-		m.pending[code] = true
-		return tea.Batch(fetchArtCmd(code), m.spinner.Tick)
-	}
-	return nil
+	return cmd
 }
 
 type artFetchedMsg struct {
@@ -133,27 +167,24 @@ func fetchArtCmd(code string) tea.Cmd {
 	}
 }
 
-func (m model) sheetArtWidths() (sheet, art int) {
-	total := m.width - m.listWidth() - 6
-	sheet = total * 58 / 100
-	art = total - sheet
-	if sheet < 22 {
-		sheet = 22
+// sheetGeometry returns the browser-list and card-sheet interior widths so
+// that both panes including borders sum exactly to the terminal width.
+func (m model) sheetGeometry() (lw, sw int) {
+	lw = m.listWidth()
+	sw = m.width - lw - 4 // two pane borders
+	for sw < 20 && lw > 24 {
+		lw--
+		sw++
 	}
-	if art < 12 {
-		art = 12
+	if sw < 16 {
+		sw = 16 // overflow gracefully below 44 columns
 	}
-	return sheet, art
+	return lw, sw
 }
 
 func (m model) sheetWidth() int {
-	s, _ := m.sheetArtWidths()
-	return s - 2
-}
-
-func (m model) artWidth() int {
-	_, a := m.sheetArtWidths()
-	return a - 2
+	_, sw := m.sheetGeometry()
+	return sw - 2
 }
 
 func (m model) listWidth() int {
@@ -283,52 +314,31 @@ func (m model) View() string {
 	if m.quitting {
 		return ""
 	}
-	filterLine := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf(
-		"[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, v images, q quit",
-		label("side", m.query.Side),
-		label("type", m.query.Type),
-		label("faction", m.query.Faction),
-		m.status,
-	))
+	filterLine := lipgloss.NewStyle().Faint(true).Render(trunc(
+		fmt.Sprintf("[1] %s  [2] %s  [3] %s  · %s · / search, enter print+quit, v images, q quit",
+			label("side", m.query.Side),
+			label("type", m.query.Type),
+			label("faction", m.query.Faction),
+			m.status), m.width))
 	bh := m.height - 3
 	if bh < 6 {
 		bh = 6
 	}
-	lw := m.listWidth()
-	sw, aw := m.sheetArtWidths()
+	lw, sw := m.sheetGeometry()
 
 	left := paneStyle(lw, bh, true).Render(paneTitle("browser") + "\n" + m.list.View())
 	mid := paneStyle(sw, bh, false).Render(paneTitle("card") + "\n" + m.preview)
-	right := paneStyle(aw, bh, false).Render(m.artBlock(aw-2, bh-2))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, mid, right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, mid)
 	return body + "\n" + filterLine
 }
 
-// artBlock renders the artwork pane: cropped image when available, a
-// spinner while fetching, faint placeholders otherwise.
-func (m model) artBlock(w, h int) string {
-	title := paneTitle("artwork")
-	sel, ok := m.list.SelectedItem().(item)
-	if !ok {
-		return title
+// trunc cuts a plain (ANSI-light) string to w printable cells.
+func trunc(s string, w int) string {
+	r := []rune(s)
+	if len(r) <= w {
+		return s
 	}
-	code := sel.card.Code
-	if payload, iw, ih := image.Card(code, w, h); payload != "" && m.imageOn {
-		return title + "\n" + lipgloss.NewStyle().Width(iw).Height(ih).Render(payload)
-	}
-	var line string
-	faint := lipgloss.NewStyle().Faint(true)
-	switch {
-	case m.pending[code] || image.Fetching(code):
-		line = m.spinner.View() + " fetching art…"
-	case m.failed[code]:
-		line = faint.Render("✗ no art")
-	case image.Path(code) == "":
-		line = faint.Render("(no artwork cached)")
-	default:
-		line = faint.Render("(press v to show)")
-	}
-	return title + "\n" + line
+	return string(r[:max(0, w-1)]) + "…"
 }
 
 const usage = `usage: nrbrowse [--plain] [--width N] [--no-icons] [--nerd] [code]
@@ -361,6 +371,22 @@ func main() {
 				fatal(usage)
 			}
 			opts.Width = n
+		case "--render-test":
+			i++
+			if i >= len(args) {
+				fatal(usage)
+			}
+			parts := strings.SplitN(args[i], "x", 2)
+			if len(parts) != 2 {
+				fatal(usage)
+			}
+			w, err1 := strconv.Atoi(parts[0])
+			h, err2 := strconv.Atoi(parts[1])
+			if err1 != nil || err2 != nil || w < 20 || h < 6 {
+				fatal(usage)
+			}
+			fmt.Print(renderTestFrame(w, h))
+			return
 		default:
 			code = args[i]
 		}
@@ -409,4 +435,37 @@ func isTTY() bool {
 func fatal(v any) {
 	fmt.Fprintln(os.Stderr, v)
 	os.Exit(1)
+}
+
+// sampleCards provides stub data for --render-test and unit tests.
+func sampleCards() []carddb.Card {
+	return []carddb.Card{
+		{Code: "01001", Title: "The Professor: Refactoring the Human", Side: "runner",
+			Faction: "shaper", Type: "identity",
+			Text:           "Begin each game with one copy of up to 3 different programs from outside the game (in your deck).",
+			InfluenceLimit: sqlNull(45), MinimumDeckSize: sqlNull(45), PackCode: "core"},
+		{Code: "01041", Title: "Bank Job", Side: "runner", Faction: "neutral-runner",
+			Type: "event", Cost: sqlNull(2),
+			Text:     "Run any server. The first time you access a Corp card each run, instead of accessing it you may place it on this event.",
+			PackCode: "core"},
+	}
+}
+
+func sqlNull(v int64) sql.NullInt64 {
+	return sql.NullInt64{Valid: true, Int64: v}
+}
+
+// renderTestFrame builds a static UI frame at WxH with sample data.
+func renderTestFrame(w, h int) string {
+	m := newModel(nil, render.Default())
+	m.width, m.height = w, h
+	lw, _ := m.sheetGeometry()
+	m.list.SetSize(lw, h-4)
+	items := make([]list.Item, len(sampleCards()))
+	for i, c := range sampleCards() {
+		items[i] = item{card: c}
+	}
+	_ = m.list.SetItems(items)
+	m.updatePreview()
+	return m.View()
 }

@@ -69,6 +69,8 @@ type model struct {
 	list    list.Model
 	spinner spinner.Model
 	preview string
+	bandW   int
+	bandH   int
 	pending map[string]bool
 	failed  map[string]bool
 
@@ -124,23 +126,51 @@ func (m *model) updatePreview() tea.Cmd {
 		m.preview = ""
 		return nil
 	}
-	_, s, _, _ := paneInteriors(m.width)
+	_, s, _ := paneInteriors(m.width)
+	bandW := s - 6 // sheet border+padding + pane border margin
+	var cmd tea.Cmd
+
+	payload, iw, ih := image.Card(sel.card.Code, bandW, bodyHeight(m.height)-2)
+	if payload != "" && m.imageMode && ih > 0 {
+		m.bandW, m.bandH = iw, ih
+	} else {
+		h := bandW * 2 / 5
+		if h < 4 {
+			h = 4
+		}
+		if h > 14 {
+			h = 14
+		}
+		m.bandW, m.bandH = bandW, h
+		if m.imageMode && image.Supported() && image.Path(sel.card.Code) == "" &&
+			!m.pending[sel.card.Code] && !m.failed[sel.card.Code] {
+			code := sel.card.Code
+			m.pending[code] = true
+			m.status = "fetching art… " + code
+			cmd = tea.Batch(fetchArtCmd(code), m.spinner.Tick)
+		}
+	}
+
 	o := m.opts
-	o.Width = s - 2
+	o.Width = s - 2 // Card() subtracts border + padding itself
+	if m.imageMode {
+		o.ArtBand = &render.ArtBand{W: m.bandW, H: m.bandH}
+		if payload == "" && image.Supported() {
+			switch {
+			case m.pending[sel.card.Code] || image.Fetching(sel.card.Code):
+				o.ArtNote = "fetching art…"
+			case m.failed[sel.card.Code]:
+				o.ArtNote = "✗ no art"
+			default:
+				o.ArtNote = "no artwork cached"
+			}
+		}
+	}
 	m.preview = render.Card(sel.card, o)
-	if !m.imageMode || !image.Supported() {
-		return nil
+	if payload != "" && m.imageMode {
+		m.preview = render.SpliceArt(m.preview, payload, o.Width)
 	}
-	code := sel.card.Code
-	if payload, _, _ := image.Card(code, m.artWidth(), bodyHeight(m.height)-2); payload != "" {
-		return nil
-	}
-	if image.Path(code) == "" && !m.pending[code] && !m.failed[code] {
-		m.pending[code] = true
-		m.status = "fetching art… " + code
-		return tea.Batch(fetchArtCmd(code), m.spinner.Tick)
-	}
-	return nil
+	return cmd
 }
 
 type artFetchedMsg struct {
@@ -208,7 +238,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		lw, _, _, _ := paneInteriors(m.width)
+		lw, _, _ := paneInteriors(m.width)
 		m.list.SetSize(lw, bodyHeight(m.height)-2)
 		if !m.loaded {
 			m.loaded = true
@@ -417,38 +447,34 @@ func label(name, val string) string {
 	return name + ":" + val
 }
 
-// paneInteriors splits the terminal width into the four pane *interior*
-// widths (browser, card sheet, artwork, deck). Borders are always drawn on
-// every pane (2 columns each), so the sum plus borders equals total
-// whenever space allows; below that we overflow gracefully instead of
-// clipping the right pane.
-func paneInteriors(total int) (l, s, a, d int) {
+// paneInteriors splits the terminal width into the three pane *interior*
+// widths (browser, card sheet, deck). Borders are always drawn on every
+// pane (2 columns each), so the sum plus borders equals total whenever
+// space allows; below that we overflow gracefully instead of clipping.
+func paneInteriors(total int) (l, s, d int) {
 	const (
-		minL, minS, minA, minD = 22, 18, 10, 26
-		borderTotal            = 8
+		minL, minS, minD = 22, 18, 26
+		borderTotal      = 6
 	)
 	inner := total - borderTotal
 	l = clamp(inner*24/100, minL, 38)
-	d = clamp(inner*25/100, minD, 42)
-	s = clamp(inner*29/100, minS, 34)
-	a = inner - l - d - s
-	if a < minA {
-		a = minA
+	d = clamp(inner*27/100, minD, 42)
+	s = inner - l - d
+	if s < minS {
+		s = minS
 	}
 	// Overflow guard for narrow terminals: shrink panes down to hard minimums.
-	for l+s+a+d > inner && (l > 16 || s > 12 || a > 6 || d > 18) {
+	for l+s+d > inner && (l > 16 || s > 12 || d > 18) {
 		switch {
-		case s >= a && s >= d && s >= l && s > 12:
+		case s >= d && s >= l && s > 12:
 			s--
-		case d >= a && d >= l && d > 18:
+		case d >= l && d > 18:
 			d--
-		case l >= a && l > 16:
-			l--
 		default:
-			a--
+			l--
 		}
 	}
-	return l, s, a, d
+	return l, s, d
 }
 
 func clamp(v, lo, hi int) int {
@@ -462,12 +488,6 @@ func clamp(v, lo, hi int) int {
 }
 
 func bodyHeight(total int) int { return max(6, total-5) }
-
-// artWidth is the artwork pane's interior width.
-func (m model) artWidth() int {
-	_, _, a, _ := paneInteriors(m.width)
-	return a - 2
-}
 
 func (m model) paneStyle(w, h int, focused bool) lipgloss.Style {
 	s := lipgloss.NewStyle().
@@ -487,33 +507,6 @@ func paneTitle(s string, focused bool) string {
 		return st.Foreground(lipgloss.Color("#88ff88")).Bold(true).Render("● " + s)
 	}
 	return st.Faint(true).Render("○ " + s)
-}
-
-// artBlock renders the artwork pane: cropped image when available, a
-// spinner while fetching, faint placeholders otherwise.
-func (m model) artBlock(w, h int) string {
-	title := paneTitle("artwork", false)
-	sel, ok := m.list.SelectedItem().(item)
-	if !ok {
-		return title
-	}
-	code := sel.card.Code
-	if payload, iw, ih := image.Card(code, w, h); payload != "" && m.imageMode {
-		return title + "\n" + lipgloss.NewStyle().Width(iw).Height(ih).Render(payload)
-	}
-	var line string
-	faint := lipgloss.NewStyle().Faint(true)
-	switch {
-	case m.pending[code] || image.Fetching(code):
-		line = m.spinner.View() + " fetching art…"
-	case m.failed[code]:
-		line = faint.Render("✗ no art")
-	case image.Path(code) == "":
-		line = faint.Render("(no artwork cached)")
-	default:
-		line = faint.Render("(press v to show)")
-	}
-	return title + "\n" + line
 }
 
 // deckView renders the deck entries with a scrolling viewport and aligned
@@ -559,7 +552,7 @@ func (m model) View() string {
 	active := lipgloss.NewStyle().Foreground(lipgloss.Color("#88ff88"))
 	inactive := lipgloss.NewStyle().Faint(true)
 
-	lw, sw, aw, dw := paneInteriors(m.width)
+	lw, sw, dw := paneInteriors(m.width)
 	bh := bodyHeight(m.height)
 
 	focusBrowserPane := m.focus == focusBrowser
@@ -567,7 +560,6 @@ func (m model) View() string {
 		paneTitle("browser", focusBrowserPane) + "\n" + m.list.View())
 	sheet := m.paneStyle(sw, bh, false).Render(
 		paneTitle("card", false) + "\n" + m.preview)
-	art := m.paneStyle(aw, bh, false).Render(m.artBlock(aw-2, bh-2))
 
 	id := "(no identity)"
 	if m.d.Identity.Type == "identity" {
@@ -577,7 +569,7 @@ func (m model) View() string {
 	right := m.paneStyle(dw, bh, focusDeckPane).Render(
 		paneTitle("deck · ◆ "+id, focusDeckPane) + "\n" + m.deckView(dw-2, bh-3))
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, sheet, art, right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, sheet, right)
 
 	issues := m.d.Validate()
 	foot := bar(active)
